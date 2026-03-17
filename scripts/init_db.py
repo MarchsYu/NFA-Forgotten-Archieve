@@ -11,6 +11,22 @@ Usage:
 Environment Variables:
     DATABASE_URL: PostgreSQL connection string
                   (default: postgresql://postgres:postgres@localhost:5432/nfa_archive)
+
+NOTE — MVP approach (Issue 8):
+    create_all() is intentionally used here for the MVP phase. It is safe for
+    fresh environments but does NOT handle incremental schema changes.
+
+    Recommended migration path to Alembic:
+      1. pip install alembic
+      2. alembic init alembic
+      3. Point alembic/env.py at Base.metadata and DATABASE_URL
+      4. alembic revision --autogenerate -m "initial schema"
+      5. alembic upgrade head
+
+    Highest-priority tables to migrate first (most likely to evolve):
+      - messages       (partial unique index, index ops — not fully expressed by create_all)
+      - topics         (Identity column — verify DDL output matches expectations)
+      - members        (is_active column removal needs explicit DROP COLUMN migration)
 """
 
 import sys
