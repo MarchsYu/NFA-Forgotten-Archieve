@@ -1,0 +1,5 @@
+group_name,platform,external_group_id,user_name,external_member_id,content,timestamp,content_type,external_message_id,reply_to_external_message_id
+NFA Test Group,telegram,tg_grp_001,Alice,tg_u_001,Hello everyone! Welcome to the group.,2024-01-15 14:30:00,text,tg_msg_001,
+NFA Test Group,telegram,tg_grp_001,Bob,tg_u_002,Hi Alice! Great to be here.,2024-01-15 14:31:05,text,tg_msg_002,tg_msg_001
+NFA Test Group,telegram,tg_grp_001,Alice,tg_u_001,Let's get started with the project discussion.,2024-01-15 14:32:20,text,tg_msg_003,
+NFA Test Group,telegram,tg_grp_001,Carol,tg_u_003,I have some ideas to share about the architecture.,2024-01-15 14:33:45,text,tg_msg_004,

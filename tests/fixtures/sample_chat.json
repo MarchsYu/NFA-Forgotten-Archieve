@@ -1,0 +1,50 @@
+[
+  {
+    "group_name": "NFA Test Group",
+    "platform": "wechat",
+    "external_group_id": "wx_grp_001",
+    "user_name": "Alice",
+    "external_member_id": "wx_u_001",
+    "content": "Hello everyone! Welcome to the group.",
+    "timestamp": "2024-01-15T14:30:00+08:00",
+    "content_type": "text",
+    "external_message_id": "wx_msg_001",
+    "reply_to_external_message_id": null
+  },
+  {
+    "group_name": "NFA Test Group",
+    "platform": "wechat",
+    "external_group_id": "wx_grp_001",
+    "user_name": "Bob",
+    "external_member_id": "wx_u_002",
+    "content": "Hi Alice! Great to be here.",
+    "timestamp": "2024-01-15T14:31:05+08:00",
+    "content_type": "text",
+    "external_message_id": "wx_msg_002",
+    "reply_to_external_message_id": "wx_msg_001"
+  },
+  {
+    "group_name": "NFA Test Group",
+    "platform": "wechat",
+    "external_group_id": "wx_grp_001",
+    "user_name": "Alice",
+    "external_member_id": "wx_u_001",
+    "content": "Let's get started with the project discussion.",
+    "timestamp": "2024-01-15T14:32:20+08:00",
+    "content_type": "text",
+    "external_message_id": "wx_msg_003",
+    "reply_to_external_message_id": null
+  },
+  {
+    "group_name": "NFA Test Group",
+    "platform": "wechat",
+    "external_group_id": "wx_grp_001",
+    "user_name": "Carol",
+    "external_member_id": "wx_u_003",
+    "content": "I have some ideas to share about the architecture.",
+    "timestamp": "2024-01-15T14:33:45+08:00",
+    "content_type": "text",
+    "external_message_id": "wx_msg_004",
+    "reply_to_external_message_id": null
+  }
+]
