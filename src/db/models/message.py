@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, List, Optional
 
-from sqlalchemy import BigInteger, String, Text, DateTime, ForeignKey, Index, func
+from sqlalchemy import BigInteger, String, Text, DateTime, ForeignKey, Index, func, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -91,11 +91,12 @@ class Message(Base):
         # SQLAlchemy renders this as:
         #   CREATE UNIQUE INDEX ... ON messages (group_id, external_message_id)
         #   WHERE external_message_id IS NOT NULL
+        # text() wraps the raw SQL for consistent SQLAlchemy expression handling.
         Index(
             "uix_messages_group_external_id",
             "group_id",
             "external_message_id",
             unique=True,
-            postgresql_where="external_message_id IS NOT NULL",
+            postgresql_where=text("external_message_id IS NOT NULL"),
         ),
     )
