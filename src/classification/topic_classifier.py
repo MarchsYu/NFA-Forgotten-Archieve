@@ -13,17 +13,26 @@ Confidence model
 
 Primary label selection
 -----------------------
-The caller (ClassificationService) marks the highest-confidence match
-as is_primary=True. Ties are broken by topic order in TOPICS list.
+1. Only topics with is_primary_eligible=True are candidates for is_primary.
+2. Among eligible candidates, the highest-confidence match wins.
+3. Ties are broken by topic order in TOPICS list (first defined wins).
+4. Fallback: if no eligible candidate exists, the highest-confidence match
+   overall is marked is_primary (should not happen with current taxonomy).
+
+Conflict handling
+-----------------
+Topics can overlap (e.g. casual_chat and meme both match "哈哈哈"). The
+is_primary flag resolves the "main" topic; all matched topics are still
+written to message_topics so the full signal is preserved.
 
 Evidence format
 ---------------
 {
     "rule_name": "keyword_match_v1",
     "text_source": "normalized_content",
-    "matched_keywords": ["keyword1", "keyword2"],
-    "strong_hits": 1,
-    "weak_hits": 1
+    "matched_keywords": ["kw1", "kw2"],       # deduplicated union
+    "strong_matched_keywords": ["kw1"],        # strong hits only
+    "weak_matched_keywords": ["kw2"],          # weak hits only
 }
 """
 
@@ -31,10 +40,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import List, Optional
+from typing import List
 
 from src.classification.topic_rules import (
     TOPICS,
+    TOPIC_MAP,
     STRONG_BASE,
     WEAK_BASE,
     EXTRA_KW_BONUS,
@@ -49,7 +59,7 @@ class TopicMatch:
     """Result of matching a single topic against a message."""
     topic_key: str
     confidence: Decimal
-    is_primary: bool = False        # set by caller after all topics are scored
+    is_primary: bool = False
     evidence: dict = field(default_factory=dict)
 
 
@@ -85,6 +95,7 @@ class TopicClassifier:
                 continue
 
             confidence = self._compute_confidence(strong_hits, weak_hits)
+
             # Deduplicate across strong/weak lists (a keyword may appear in both)
             seen: set = set()
             all_hits = []
@@ -97,8 +108,8 @@ class TopicClassifier:
                 "rule_name": "keyword_match_v1",
                 "text_source": text_source,
                 "matched_keywords": all_hits,
-                "strong_hits": len(strong_hits),
-                "weak_hits": len(weak_hits),
+                "strong_matched_keywords": strong_hits,
+                "weak_matched_keywords": weak_hits,
             }
 
             matches.append(TopicMatch(
@@ -107,9 +118,13 @@ class TopicClassifier:
                 evidence=evidence,
             ))
 
-        # Mark the highest-confidence match as primary
+        # Primary label selection:
+        # 1. Prefer is_primary_eligible topics
+        # 2. Highest confidence wins; ties broken by TOPICS list order (already preserved)
         if matches:
-            primary = max(matches, key=lambda m: m.confidence)
+            eligible = [m for m in matches if TOPIC_MAP[m.topic_key].is_primary_eligible]
+            primary_pool = eligible if eligible else matches  # fallback: all matches
+            primary = max(primary_pool, key=lambda m: m.confidence)
             primary.is_primary = True
 
         return matches
@@ -125,5 +140,4 @@ class TopicClassifier:
             extra = (len(weak_hits) - 1) * EXTRA_KW_BONUS
 
         raw = min(base + extra, MAX_CONFIDENCE)
-        # Round to 4 decimal places to match Numeric(5,4) column
         return Decimal(str(round(raw, 4)))

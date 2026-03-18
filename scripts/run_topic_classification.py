@@ -89,13 +89,17 @@ def main() -> None:
         raise
 
     print("✅ Classification complete")
-    print(f"   Messages processed        : {result.messages_processed}")
-    print(f"   Messages skipped          : {result.messages_skipped}")
-    print(f"   Messages unmatched        : {result.messages_unmatched}")
-    print(f"   Topic assignments written : {result.topic_assignments_written}")
+    print(f"   Messages processed              : {result.messages_processed}")
+    print(f"   Messages skipped (already done) : {result.messages_skipped_already_classified}")
+    print(f"   Messages unmatched (no topic)   : {result.messages_unmatched}")
+    print(f"   Topic assignments written       : {result.topic_assignments_written}")
+    if result.missing_topic_assignments:
+        print(f"   ⚠️  Assignments dropped (topic not in DB): {result.missing_topic_assignments}")
+        print(f"      Missing topic keys: {result.missing_topic_keys}")
+        print(f"      → Run: python scripts/init_topics.py")
     if result.messages_processed > 0:
         match_rate = (result.messages_processed - result.messages_unmatched) / result.messages_processed
-        print(f"   Match rate                : {match_rate:.1%}")
+        print(f"   Match rate                      : {match_rate:.1%}")
 
 
 if __name__ == "__main__":
