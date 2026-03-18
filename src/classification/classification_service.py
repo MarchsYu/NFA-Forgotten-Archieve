@@ -3,30 +3,44 @@ Classification service – reads messages from DB, classifies them, writes resul
 
 Two run modes
 -------------
-Mode A (default): classify only messages not yet classified by *classifier_version*.
+Mode A (default / incremental):
+    Classify only messages not yet classified by *classifier_version*.
     service.run(classifier_version="rule_v1")
 
-Mode B (rerun): delete existing results for *classifier_version* then re-classify all.
+Mode B (rerun):
+    Delete existing results for *classifier_version*, then re-classify all.
     service.run(classifier_version="rule_v1", rerun=True)
 
 Idempotency
 -----------
 message_topics PK is (message_id, topic_id, classifier_version).
-In Mode A, already-classified messages are skipped via a NOT EXISTS subquery.
+In Mode A, already-classified messages are excluded from each fetch query.
 In Mode B, existing rows for the version are deleted before re-inserting.
 
-Batch processing
-----------------
-Messages are fetched in configurable batches (default 500) to avoid loading
-the entire table into memory.
+Batch processing – keyset pagination
+--------------------------------------
+Both modes use keyset pagination (Message.id > last_seen_id) rather than
+OFFSET-based pagination.
+
+Why OFFSET is wrong for Mode A:
+  The incremental query filters out already-classified messages via NOT EXISTS.
+  After each batch is processed and flushed, those messages become classified,
+  so the result set shrinks. Advancing OFFSET by batch_size on a shrinking
+  result set skips over unprocessed messages ("漏数" bug).
+
+Keyset pagination is safe because:
+  - We always query id > last_seen_id, so we never revisit processed messages.
+  - The NOT EXISTS filter only removes rows we've already handled (id <= last_seen_id).
+  - New unclassified rows with id > last_seen_id are always picked up correctly.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import List, Optional
+import warnings
+from dataclasses import dataclass, field
+from typing import List, Optional, Set
 
-from sqlalchemy import select, delete, exists
+from sqlalchemy import select, delete, exists, func
 from sqlalchemy.orm import Session
 
 from src.db.models import Message, Topic, MessageTopic
@@ -39,9 +53,11 @@ class ClassificationResult:
     """Summary of a classification run."""
     classifier_version: str
     messages_processed: int
-    messages_skipped: int
+    messages_skipped_already_classified: int
     topic_assignments_written: int
     messages_unmatched: int
+    missing_topic_assignments: int          # assignments dropped because topic not in DB
+    missing_topic_keys: List[str] = field(default_factory=list)
 
 
 class ClassificationService:
@@ -99,19 +115,25 @@ class ClassificationService:
         """
         session = self._get_session()
         try:
-            # Build topic_key → topic_id lookup (topics must be seeded first)
             topic_id_map = self._load_topic_id_map(session)
             if not topic_id_map:
                 raise RuntimeError(
                     "No topics found in DB. Run scripts/init_topics.py first."
                 )
 
+            # Count already-classified messages before any changes
+            already_classified = self._count_already_classified(
+                session, classifier_version, group_id
+            )
+
             if rerun:
                 self._delete_existing(session, classifier_version, group_id)
                 session.flush()
+                already_classified = 0  # we just deleted them
 
             result = self._classify_messages(
-                session, classifier_version, topic_id_map, group_id, rerun
+                session, classifier_version, topic_id_map, group_id,
+                already_classified_before_run=already_classified,
             )
             self._close_session(commit=True)
             return result
@@ -124,12 +146,28 @@ class ClassificationService:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _load_topic_id_map(session: Session) -> dict[str, int]:
+    def _load_topic_id_map(session: Session) -> dict:
         """Return {topic_key: topic.id} for all active topics."""
         rows = session.execute(
             select(Topic.topic_key, Topic.id).where(Topic.is_active == True)
         ).all()
         return {row.topic_key: row.id for row in rows}
+
+    @staticmethod
+    def _count_already_classified(
+        session: Session,
+        classifier_version: str,
+        group_id,
+    ) -> int:
+        """Count distinct messages already classified by this version."""
+        stmt = (
+            select(func.count(func.distinct(MessageTopic.message_id)))
+            .where(MessageTopic.classifier_version == classifier_version)
+        )
+        if group_id is not None:
+            msg_ids = select(Message.id).where(Message.group_id == group_id).scalar_subquery()
+            stmt = stmt.where(MessageTopic.message_id.in_(msg_ids))
+        return session.execute(stmt).scalar_one() or 0
 
     @staticmethod
     def _delete_existing(
@@ -139,7 +177,6 @@ class ClassificationService:
     ) -> None:
         """Delete all MessageTopic rows for this classifier_version (optionally scoped to group)."""
         if group_id is not None:
-            # Subquery: message IDs belonging to the group
             msg_ids = select(Message.id).where(Message.group_id == group_id).scalar_subquery()
             stmt = delete(MessageTopic).where(
                 MessageTopic.classifier_version == classifier_version,
@@ -155,20 +192,26 @@ class ClassificationService:
         self,
         session: Session,
         classifier_version: str,
-        topic_id_map: dict[str, int],
+        topic_id_map: dict,
         group_id,
-        rerun: bool,
+        already_classified_before_run: int,
     ) -> ClassificationResult:
-        """Fetch messages in batches and classify each one."""
+        """
+        Fetch messages in batches using keyset pagination and classify each one.
+
+        Keyset pagination (id > last_seen_id) is used instead of OFFSET to avoid
+        the "漏数" bug in incremental mode where the result set shrinks as we write.
+        """
         processed = 0
-        skipped = 0
         written = 0
         unmatched = 0
-        offset = 0
+        missing_assignments = 0
+        missing_keys: Set[str] = set()
+        last_seen_id: int = 0
 
         while True:
             batch = self._fetch_batch(
-                session, classifier_version, group_id, rerun, offset
+                session, classifier_version, group_id, last_seen_id
             )
             if not batch:
                 break
@@ -180,12 +223,15 @@ class ClassificationService:
                 if not matches:
                     unmatched += 1
                     processed += 1
+                    last_seen_id = message.id
                     continue
 
                 for match in matches:
                     topic_id = topic_id_map.get(match.topic_key)
                     if topic_id is None:
-                        continue  # topic not seeded – skip silently
+                        missing_assignments += 1
+                        missing_keys.add(match.topic_key)
+                        continue
 
                     mt = MessageTopic(
                         message_id=message.id,
@@ -199,20 +245,25 @@ class ClassificationService:
                     written += 1
 
                 processed += 1
+                last_seen_id = message.id
 
             session.flush()
-            offset += len(batch)
 
-            # If batch was smaller than batch_size, we've reached the end
-            if len(batch) < self._batch_size:
-                break
+        if missing_keys:
+            warnings.warn(
+                f"Classification: {missing_assignments} assignment(s) dropped because "
+                f"these topic_keys are not in the DB: {sorted(missing_keys)}. "
+                f"Run scripts/init_topics.py to seed missing topics."
+            )
 
         return ClassificationResult(
             classifier_version=classifier_version,
             messages_processed=processed,
-            messages_skipped=skipped,
+            messages_skipped_already_classified=already_classified_before_run,
             topic_assignments_written=written,
             messages_unmatched=unmatched,
+            missing_topic_assignments=missing_assignments,
+            missing_topic_keys=sorted(missing_keys),
         )
 
     def _fetch_batch(
@@ -220,31 +271,32 @@ class ClassificationService:
         session: Session,
         classifier_version: str,
         group_id,
-        rerun: bool,
-        offset: int,
+        last_seen_id: int,
     ) -> List[Message]:
-        """Fetch a batch of messages to classify."""
-        stmt = select(Message)
+        """
+        Fetch the next batch of unclassified messages using keyset pagination.
 
-        if group_id is not None:
-            stmt = stmt.where(Message.group_id == group_id)
-
-        if not rerun:
-            # Mode A: skip messages already classified by this version
-            already_classified = (
-                select(MessageTopic.message_id)
-                .where(MessageTopic.classifier_version == classifier_version)
-                .correlate(Message)
-                .scalar_subquery()
-            )
-            stmt = stmt.where(
+        Always filters: Message.id > last_seen_id (keyset cursor)
+        Always filters: NOT EXISTS matching MessageTopic for this classifier_version
+          (incremental – skip already-classified messages regardless of rerun flag,
+           since in rerun mode we deleted them all upfront anyway)
+        """
+        stmt = (
+            select(Message)
+            .where(
+                Message.id > last_seen_id,
                 ~exists(
                     select(MessageTopic.message_id).where(
                         MessageTopic.message_id == Message.id,
                         MessageTopic.classifier_version == classifier_version,
                     )
-                )
+                ),
             )
+            .order_by(Message.id)
+            .limit(self._batch_size)
+        )
 
-        stmt = stmt.order_by(Message.id).offset(offset).limit(self._batch_size)
+        if group_id is not None:
+            stmt = stmt.where(Message.group_id == group_id)
+
         return list(session.execute(stmt).scalars().all())
