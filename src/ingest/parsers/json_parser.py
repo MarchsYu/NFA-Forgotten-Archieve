@@ -29,7 +29,7 @@ Field mapping rules:
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -122,20 +122,23 @@ class JSONParser:
         )
 
     def _parse_timestamp(self, value: Any) -> datetime:
-        """Parse ISO 8601 or Unix timestamp (int/float) into datetime."""
+        """Parse ISO 8601 or Unix timestamp into UTC-aware datetime.
+
+        Rule: all naive datetimes are treated as UTC.
+        """
         if isinstance(value, (int, float)):
-            # Assume seconds since epoch; convert to datetime
-            return datetime.fromtimestamp(value)
+            # Explicit UTC for numeric epoch timestamps
+            return datetime.fromtimestamp(value, tz=timezone.utc)
 
         if isinstance(value, str):
-            # Try ISO 8601 first
             try:
-                # Python 3.11+ supports fromisoformat with timezone
-                return datetime.fromisoformat(value.replace("Z", "+00:00"))
+                dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt
             except ValueError:
                 pass
 
-            # Fallback common formats
             formats = [
                 "%Y-%m-%d %H:%M:%S",
                 "%Y-%m-%d %H:%M",
@@ -146,7 +149,8 @@ class JSONParser:
             ]
             for fmt in formats:
                 try:
-                    return datetime.strptime(value, fmt)
+                    dt = datetime.strptime(value, fmt)
+                    return dt.replace(tzinfo=timezone.utc)
                 except ValueError:
                     continue
 
