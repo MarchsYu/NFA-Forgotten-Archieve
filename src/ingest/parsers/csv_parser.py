@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import csv
 import warnings
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -129,6 +129,7 @@ class CSVParser:
         return messages
 
     def _parse_timestamp(self, value: str) -> datetime:
+        """Parse timestamp string; all naive results are treated as UTC."""
         formats = [
             "%Y-%m-%d %H:%M:%S",
             "%Y-%m-%d %H:%M",
@@ -139,11 +140,15 @@ class CSVParser:
         ]
         for fmt in formats:
             try:
-                return datetime.strptime(value, fmt)
+                dt = datetime.strptime(value, fmt)
+                return dt.replace(tzinfo=timezone.utc)
             except ValueError:
                 continue
         try:
-            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
         except ValueError:
             pass
         raise ValueError(f"Unable to parse timestamp: {value!r}")

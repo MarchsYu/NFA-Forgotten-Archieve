@@ -7,15 +7,40 @@ Responsibilities:
 3. Get-or-create Group and Member records
 4. Upsert messages with idempotency guarantees
 
-Idempotency strategy:
-- If external_message_id is present → use (group_id, external_message_id) unique constraint
-  to avoid duplicates. The DB partial unique index rejects duplicates at INSERT time.
-- If external_message_id is absent → we allow duplicates (no reliable key available).
-  A warning is emitted for each such message so the operator knows.
+Idempotency strategy
+--------------------
+Case A – external_message_id present:
+    Rely on the DB partial unique index (group_id, external_message_id)
+    WHERE external_message_id IS NOT NULL. IntegrityError → skip.
 
-This is the minimal viable strategy for MVP. Future improvements could include:
-- Weak deduplication via (group_id, member_id, sent_at, content_hash)
-- Content-hash based upsert for messages without platform IDs
+Case B – external_message_id absent (e.g. TXT imports):
+    Weak dedup via service-layer SELECT before INSERT.
+    Match condition: (group_id, member_id, sent_at, normalized_content, source_file).
+    Guarantees: re-importing the *same file* will not double-insert messages.
+    Limitation: cannot detect duplicates across different source files.
+
+Group / Member fallback keys
+-----------------------------
+When external_group_id / external_member_id are absent, synthetic fallback keys
+are constructed with the prefix "__fb__" to avoid collisions with real platform IDs:
+
+    group   → "__fb__:{source_file}:{group_name}"
+    member  → "__fb__:{source_file}:{user_name}"
+
+This scopes identity to the source file, preventing "same name = same entity"
+false merges across files. Cross-file identity resolution is deferred to Phase 2.
+
+Timestamp rule
+--------------
+All datetimes stored in the DB are UTC-aware. Parsers guarantee tz-aware output;
+_insert_message applies a final UTC fallback for any residual naive values.
+
+reply_to backfill (Phase 2 note)
+---------------------------------
+reply_to_external_message_id is preserved in raw_payload["reply_to_external_message_id"].
+The reply_to_message_id FK column exists in the schema but is not populated here.
+Phase 2 should run a post-import pass: for each message where raw_payload contains
+reply_to_external_message_id, resolve it to the internal message.id and update the FK.
 """
 
 from __future__ import annotations
@@ -23,11 +48,11 @@ from __future__ import annotations
 import uuid
 import warnings
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from sqlalchemy import select, insert
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -177,24 +202,25 @@ class IngestService:
 
         Strategy:
         1. Determine group (all messages assumed same group in file)
-        2. Get-or-create Group
-        3. For each message: get-or-create Member, then insert Message
-        4. Handle IntegrityError for duplicate external_message_id
+        2. Get-or-create Group using fallback key when external_group_id is absent
+        3. For each message: get-or-create Member (with fallback key), then insert Message
+        4. Case A (has external_message_id): rely on DB unique constraint
+        5. Case B (no external_message_id): SELECT-before-INSERT weak dedup
         """
         if not messages:
             raise ValueError("Empty message list")
 
-        # Assume all messages belong to same group (first message defines it)
         first = messages[0]
         group = self._get_or_create_group(
             session,
             platform=first.platform,
             external_group_id=first.external_group_id,
             name=first.group_name,
+            source_file=first.source_file,
         )
 
-        # Track members to avoid redundant DB calls
-        member_cache: Dict[Tuple[uuid.UUID, Optional[str]], Member] = {}
+        # Cache key: (group_id, resolved_external_member_id)
+        member_cache: Dict[Tuple[uuid.UUID, str], Member] = {}
 
         inserted = 0
         skipped_duplicate = 0
@@ -203,8 +229,9 @@ class IngestService:
         members_reused = 0
 
         for pm in messages:
-            # Get or create member
-            cache_key = (group.id, pm.external_member_id or pm.user_name)
+            resolved_member_id = self._resolve_member_id(pm)
+            cache_key = (group.id, resolved_member_id)
+
             if cache_key in member_cache:
                 member = member_cache[cache_key]
                 members_reused += 1
@@ -212,7 +239,7 @@ class IngestService:
                 member, was_created = self._get_or_create_member(
                     session,
                     group_id=group.id,
-                    external_member_id=pm.external_member_id or pm.user_name,
+                    external_member_id=resolved_member_id,
                     display_name=pm.user_name,
                 )
                 member_cache[cache_key] = member
@@ -221,26 +248,23 @@ class IngestService:
                 else:
                     members_reused += 1
 
-            # Track messages without external ID
             if not pm.external_message_id:
                 without_external_id += 1
-                warnings.warn(
-                    f"Message without external_message_id from {pm.user_name} "
-                    f"at {pm.timestamp} – duplicates possible"
-                )
-
-            # Attempt insert; rely on DB unique constraint for idempotency.
-            # Use a savepoint (begin_nested) so that only this INSERT is rolled
-            # back on duplicate, not the entire transaction.
-            try:
-                with session.begin_nested():
-                    self._insert_message(session, group.id, member.id, pm)
+                # Case B: weak dedup via SELECT before INSERT
+                if self._message_exists(session, group.id, member.id, pm):
+                    skipped_duplicate += 1
+                    continue
+                # No duplicate found – proceed with insert (no IntegrityError expected)
+                self._insert_message(session, group.id, member.id, pm)
                 inserted += 1
-            except IntegrityError:
-                # Duplicate external_message_id detected by DB unique constraint.
-                # Savepoint was rolled back; outer transaction remains intact.
-                skipped_duplicate += 1
-                continue
+            else:
+                # Case A: rely on DB partial unique index; catch IntegrityError
+                try:
+                    with session.begin_nested():
+                        self._insert_message(session, group.id, member.id, pm)
+                    inserted += 1
+                except IntegrityError:
+                    skipped_duplicate += 1
 
         return IngestResult(
             group_id=group.id,
@@ -257,10 +281,21 @@ class IngestService:
         platform: str,
         external_group_id: Optional[str],
         name: str,
+        source_file: Optional[str],
     ) -> Group:
-        """Get existing group or create new one."""
-        # Use external_group_id if available, otherwise use name as identifier
-        lookup_key = external_group_id or name
+        """Get existing group or create new one.
+
+        When external_group_id is absent, a synthetic fallback key is used:
+            "__fb__:{source_file}:{group_name}"
+        This prevents same-platform same-name groups from different files
+        being incorrectly merged. The "__fb__" prefix distinguishes synthetic
+        keys from real platform IDs.
+        """
+        if external_group_id:
+            lookup_key = external_group_id
+        else:
+            # Scope to source file to avoid cross-file false merges
+            lookup_key = f"__fb__:{source_file or ''}:{name}"
 
         stmt = select(Group).where(
             Group.platform == platform,
@@ -276,7 +311,7 @@ class IngestService:
             name=name,
         )
         session.add(group)
-        session.flush()  # Generate UUID
+        session.flush()
         return group
 
     def _get_or_create_member(
@@ -310,6 +345,50 @@ class IngestService:
         session.flush()
         return member, True
 
+    @staticmethod
+    def _resolve_member_id(pm: ParsedMessage) -> str:
+        """Return the external_member_id to use for DB lookup/creation.
+
+        When external_member_id is present, use it directly (real platform ID).
+        When absent, construct a synthetic fallback key scoped to the source file:
+            "__fb__:{source_file}:{user_name}"
+
+        This prevents same-display-name users from different files being merged.
+        Limitation: the same real person appearing in multiple files will get
+        separate Member rows. Cross-file identity resolution is a Phase 2 concern.
+        """
+        if pm.external_member_id:
+            return pm.external_member_id
+        return f"__fb__:{pm.source_file or ''}:{pm.user_name}"
+
+    @staticmethod
+    def _message_exists(
+        session: Session,
+        group_id: uuid.UUID,
+        member_id: uuid.UUID,
+        pm: ParsedMessage,
+    ) -> bool:
+        """Check if a semantically identical message already exists (weak dedup).
+
+        Used only when external_message_id is absent. Matches on:
+            (group_id, member_id, sent_at, normalized_content, source_file)
+
+        This guarantees that re-importing the same source file does not produce
+        duplicate rows. It does NOT detect duplicates across different source files.
+        """
+        sent_at = pm.timestamp
+        if sent_at.tzinfo is None:
+            sent_at = sent_at.replace(tzinfo=timezone.utc)
+
+        stmt = select(Message.id).where(
+            Message.group_id == group_id,
+            Message.member_id == member_id,
+            Message.sent_at == sent_at,
+            Message.normalized_content == pm.normalized_content,
+            Message.source_file == pm.source_file,
+        ).limit(1)
+        return session.execute(stmt).scalar_one_or_none() is not None
+
     def _insert_message(
         self,
         session: Session,
@@ -317,11 +396,21 @@ class IngestService:
         member_id: uuid.UUID,
         pm: ParsedMessage,
     ) -> None:
-        """Insert a single message row."""
-        # Ensure timezone-aware datetime
+        """Insert a single message row.
+
+        reply_to_message_id is intentionally left NULL here.
+        reply_to_external_message_id is preserved in raw_payload so that a
+        Phase 2 backfill pass can resolve it to the internal FK.
+        """
         sent_at = pm.timestamp
         if sent_at.tzinfo is None:
+            # Final safety net: parsers should already produce tz-aware datetimes
             sent_at = sent_at.replace(tzinfo=timezone.utc)
+
+        # Ensure reply_to_external_message_id survives in raw_payload
+        raw = dict(pm.raw_payload) if pm.raw_payload else {}
+        if pm.reply_to_external_message_id and "reply_to_external_message_id" not in raw:
+            raw["reply_to_external_message_id"] = pm.reply_to_external_message_id
 
         message = Message(
             group_id=group_id,
@@ -332,8 +421,7 @@ class IngestService:
             normalized_content=pm.normalized_content,
             content_type=pm.content_type,
             source_file=pm.source_file,
-            raw_payload=pm.raw_payload,
+            raw_payload=raw,
         )
         session.add(message)
-        # Flush to catch unique constraint violations early
         session.flush()
