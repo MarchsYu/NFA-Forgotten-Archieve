@@ -20,6 +20,26 @@ Incremental mode (rerun=False, default):
 Rerun mode (rerun=True):
     Delete existing snapshots for this version + window, then re-generate.
 
+Transaction isolation – per-member savepoints
+---------------------------------------------
+Each member's profile write is wrapped in a SAVEPOINT (nested transaction).
+If one member fails, only that savepoint is rolled back; all previously
+committed savepoints in the same run remain intact.  The outer transaction
+is committed at the end of the loop.
+
+This guarantees that profiles_written always matches the actual number of
+rows in profile_snapshots after the run completes.
+
+classifier_version vs profile_version
+--------------------------------------
+- profile_version  : version of the profiling algorithm (e.g. "profile_v1").
+                     Stored in profile_snapshots.profile_version.
+- classifier_version: version of the topic classifier whose MessageTopic rows
+                     are consumed (e.g. "rule_v1").  Stored in
+                     profile_snapshots.stats["classifier_version"].
+                     Must be specified explicitly; defaults to CLASSIFIER_VERSION
+                     from the classification module.
+
 Run modes
 ---------
 Mode A – group scope:
@@ -30,7 +50,7 @@ Mode A – group scope:
 Mode B – single member:
     service.run(profile_version=..., window_start=..., window_end=...,
                 member_id=<uuid>, group_id=<uuid>)
-    Profiles exactly one member.
+    Profiles exactly one member.  member must belong to group_id.
 
 Mode C – all groups (no filter):
     service.run(profile_version=..., window_start=..., window_end=...)
@@ -45,9 +65,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
-from sqlalchemy import select, delete, func
+from sqlalchemy import select, delete
 from sqlalchemy.orm import Session
 
+from src.classification.topic_classifier import CLASSIFIER_VERSION
 from src.db.models import Member, Message, MessageTopic, ProfileSnapshot, Topic
 from src.db.session import SessionLocal
 from src.profiling.profile_builder import ProfileBuilder, ProfileData, PROFILE_VERSION
@@ -57,12 +78,14 @@ from src.profiling.profile_builder import ProfileBuilder, ProfileData, PROFILE_V
 class ProfilingResult:
     """Summary of a profile generation run."""
     profile_version: str
+    classifier_version: str
     window_start: datetime
     window_end: datetime
     members_attempted: int
     profiles_written: int
     profiles_skipped: int
     profiles_failed: int
+    missing_topic_count: int = 0          # topic_id→key lookups that failed
     failed_member_ids: List[str] = field(default_factory=list)
 
 
@@ -75,6 +98,7 @@ class ProfileService:
         service = ProfileService()
         result = service.run(
             profile_version="profile_v1",
+            classifier_version="rule_v1",
             window_start=datetime(2026, 1, 1, tzinfo=timezone.utc),
             window_end=datetime(2026, 12, 31, 23, 59, 59, tzinfo=timezone.utc),
             group_id=some_uuid,
@@ -113,6 +137,7 @@ class ProfileService:
     def run(
         self,
         profile_version: str = PROFILE_VERSION,
+        classifier_version: str = CLASSIFIER_VERSION,
         window_start: Optional[datetime] = None,
         window_end: Optional[datetime] = None,
         group_id: Optional[uuid.UUID] = None,
@@ -123,13 +148,17 @@ class ProfileService:
         Generate Persona Profiles and write them to profile_snapshots.
 
         Args:
-            profile_version: Version tag for this run (e.g. "profile_v1").
-            window_start:    Start of the analysis window (UTC, inclusive).
-            window_end:      End of the analysis window (UTC, inclusive).
-            group_id:        Restrict to one group (optional).
-            member_id:       Restrict to one member (requires group_id).
-            rerun:           If True, delete existing snapshots for this
-                             version + window before re-generating.
+            profile_version:    Version tag for this run (e.g. "profile_v1").
+            classifier_version: Which MessageTopic classifier version to read
+                                (e.g. "rule_v1").  Must be explicit; no
+                                auto-detection.
+            window_start:       Start of the analysis window (UTC, inclusive).
+            window_end:         End of the analysis window (UTC, inclusive).
+            group_id:           Restrict to one group (optional).
+            member_id:          Restrict to one member (requires group_id).
+                                The member must belong to group_id.
+            rerun:              If True, delete existing snapshots for this
+                                version + window before re-generating.
 
         Returns:
             ProfilingResult with counts.
@@ -147,18 +176,23 @@ class ProfileService:
             # Resolve members to process
             members = self._load_members(session, group_id, member_id)
 
+            # Validate member/group consistency when both are specified
+            if member_id is not None and group_id is not None:
+                self._assert_member_in_group(members, member_id, group_id)
+
             if rerun:
                 self._delete_existing(session, profile_version, window_start, window_end,
                                       group_id, member_id)
                 session.flush()
 
-            # Count already-existing snapshots (after potential delete)
+            # Snapshot of already-existing member_ids (after potential delete)
             existing_keys = self._load_existing_keys(
                 session, profile_version, window_start, window_end
             )
 
             result = ProfilingResult(
                 profile_version=profile_version,
+                classifier_version=classifier_version,
                 window_start=window_start,
                 window_end=window_end,
                 members_attempted=len(members),
@@ -172,22 +206,36 @@ class ProfileService:
                     result.profiles_skipped += 1
                     continue
 
+                # ── Per-member savepoint ──────────────────────────────────
+                # If this member fails, only its savepoint is rolled back.
+                # All previously released savepoints (successful members)
+                # remain in the outer transaction and will be committed.
                 try:
-                    profile = self._build_profile(
-                        session, member, topic_key_map,
-                        profile_version, window_start, window_end,
-                    )
-                    self._write_snapshot(session, profile)
-                    session.flush()
+                    with session.begin_nested():
+                        profile, missing = self._build_profile(
+                            session, member, topic_key_map,
+                            profile_version, classifier_version,
+                            window_start, window_end,
+                        )
+                        self._write_snapshot(session, profile)
+                    # Savepoint released (committed to outer transaction)
                     result.profiles_written += 1
+                    result.missing_topic_count += missing
+                    if missing:
+                        warnings.warn(
+                            f"ProfileService: {missing} topic_id(s) had no matching "
+                            f"topic_key for member {member.id} ({member.display_name}). "
+                            f"Those topic assignments were excluded from the profile. "
+                            f"Run scripts/init_topics.py to seed missing topics."
+                        )
                 except Exception as exc:
+                    # Savepoint was automatically rolled back by begin_nested()
                     warnings.warn(
                         f"ProfileService: failed to build profile for member "
                         f"{member.id} ({member.display_name}): {exc}"
                     )
                     result.profiles_failed += 1
                     result.failed_member_ids.append(str(member.id))
-                    session.rollback()
 
             self._close_session(commit=True)
             return result
@@ -195,6 +243,33 @@ class ProfileService:
         except Exception:
             self._close_session(commit=False)
             raise
+
+    # ------------------------------------------------------------------
+    # Internal helpers – validation
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _assert_member_in_group(
+        members: List[Member],
+        member_id: uuid.UUID,
+        group_id: uuid.UUID,
+    ) -> None:
+        """
+        Raise ValueError if the loaded member does not belong to group_id.
+
+        Called only when both member_id and group_id are specified.
+        """
+        if not members:
+            raise ValueError(
+                f"member_id {member_id} not found in the database."
+            )
+        member = members[0]
+        if member.group_id != group_id:
+            raise ValueError(
+                f"member_id {member_id} belongs to group {member.group_id}, "
+                f"not to the specified group_id {group_id}. "
+                f"Refusing to write profile_snapshot to avoid data corruption."
+            )
 
     # ------------------------------------------------------------------
     # Internal helpers – data loading
@@ -268,25 +343,35 @@ class ProfileService:
         member: Member,
         topic_key_map: Dict[int, str],
         profile_version: str,
+        classifier_version: str,
         window_start: datetime,
         window_end: datetime,
-    ) -> ProfileData:
-        """Load member data and delegate to ProfileBuilder."""
+    ) -> Tuple[ProfileData, int]:
+        """
+        Load member data and delegate to ProfileBuilder.
+
+        Returns:
+            (ProfileData, missing_topic_count)
+        """
         messages = self._load_messages(session, member.id, window_start, window_end)
-        topic_rows = self._load_topic_rows(session, member.id, topic_key_map,
-                                           window_start, window_end)
+        topic_rows, missing = self._load_topic_rows(
+            session, member.id, topic_key_map, classifier_version,
+            window_start, window_end,
+        )
         reply_targets = self._resolve_reply_targets(session, messages)
 
-        return self._builder.build(
+        profile = self._builder.build(
             member_id=member.id,
             group_id=member.group_id,
             messages=messages,
             topic_rows=topic_rows,
             reply_targets=reply_targets,
             profile_version=profile_version,
+            classifier_version=classifier_version,
             window_start=window_start,
             window_end=window_end,
         )
+        return profile, missing
 
     @staticmethod
     def _load_messages(
@@ -311,13 +396,19 @@ class ProfileService:
         session: Session,
         member_id: uuid.UUID,
         topic_key_map: Dict[int, str],
+        classifier_version: str,
         window_start: datetime,
         window_end: datetime,
-    ) -> List[_TopicRow]:
+    ) -> Tuple[List[_TopicRow], int]:
         """
-        Return lightweight topic-assignment rows for this member's messages.
+        Return lightweight topic-assignment rows for this member's messages,
+        filtered to the specified classifier_version.
 
-        Each row has .topic_key (str) and .is_primary (bool).
+        Returns:
+            (rows, missing_count)
+            rows:          list of _TopicRow with .topic_key and .is_primary
+            missing_count: number of topic_id values with no matching topic_key
+                           (indicates unseeded topics – caller should warn)
         """
         # Subquery: message IDs for this member in the window
         msg_ids_sq = (
@@ -332,16 +423,25 @@ class ProfileService:
 
         rows = session.execute(
             select(MessageTopic.topic_id, MessageTopic.is_primary)
-            .where(MessageTopic.message_id.in_(msg_ids_sq))
+            .where(
+                MessageTopic.message_id.in_(msg_ids_sq),
+                # ── classifier_version filter ──────────────────────────
+                # Only consume topic assignments from the specified version.
+                # Without this, profiles built from different classifier runs
+                # would be mixed, making results non-reproducible.
+                MessageTopic.classifier_version == classifier_version,
+            )
         ).all()
 
-        result = []
+        result: List[_TopicRow] = []
+        missing_count = 0
         for row in rows:
             topic_key = topic_key_map.get(row.topic_id)
             if topic_key is None:
-                continue  # topic not in active set – skip silently
+                missing_count += 1
+                continue
             result.append(_TopicRow(topic_key=topic_key, is_primary=row.is_primary))
-        return result
+        return result, missing_count
 
     @staticmethod
     def _resolve_reply_targets(
@@ -364,7 +464,6 @@ class ProfileService:
         if not reply_ids:
             return []
 
-        # Load the replied-to messages to find their senders
         replied_msgs = session.execute(
             select(Message.id, Message.member_id)
             .where(Message.id.in_(reply_ids))
@@ -373,7 +472,6 @@ class ProfileService:
         if not replied_msgs:
             return []
 
-        # Load display names for those senders
         sender_ids = list({row.member_id for row in replied_msgs})
         members = session.execute(
             select(Member.id, Member.display_name)
@@ -381,7 +479,6 @@ class ProfileService:
         ).all()
         name_map = {row.id: row.display_name for row in members}
 
-        # Build a lookup: replied_message_id → sender_member_id
         replied_sender: Dict[int, uuid.UUID] = {
             row.id: row.member_id for row in replied_msgs
         }

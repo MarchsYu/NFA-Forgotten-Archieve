@@ -21,13 +21,16 @@ traits (JSONB)
                                         | "night" | "mixed"
 
 stats (JSONB)
-    message_count       : int
-    avg_message_length  : float
-    top_keywords        : list[{word, count}]
-    topic_distribution  : dict[str, int]   – primary topics only
-    all_topics_distribution : dict[str, int] – all matched topics
-    active_hours        : dict[str, int]   – {"0": n, ..., "23": n}
-    interaction_top     : list[{member_id, display_name, count}]
+    message_count           : int
+    avg_message_length      : float
+    top_keywords            : list[{word, count}]
+    topic_distribution      : dict[str, int]   – primary topics only
+    all_topics_distribution : dict[str, int]   – all matched topics
+    active_hours            : dict[str, int]   – {"0": n, ..., "23": n}
+    interaction_top         : list[{member_id, display_name, count}]
+    classifier_version      : str              – which classifier version's
+                                                 topic assignments were used
+                                                 (for reproducibility)
 """
 
 from __future__ import annotations
@@ -48,6 +51,8 @@ from src.profiling.profile_analyzers import (
     compute_top_keywords,
     compute_verbosity_level,
 )
+
+from src.classification.topic_classifier import CLASSIFIER_VERSION
 
 PROFILE_VERSION = "profile_v1"
 
@@ -98,6 +103,7 @@ class ProfileBuilder:
         topic_rows: List[Any],
         reply_targets: List[Dict[str, Any]],
         profile_version: str = PROFILE_VERSION,
+        classifier_version: str = CLASSIFIER_VERSION,
         window_start: Optional[datetime] = None,
         window_end: Optional[datetime] = None,
     ) -> ProfileData:
@@ -105,16 +111,22 @@ class ProfileBuilder:
         Compute and return a ProfileData for the given member.
 
         Args:
-            member_id:       UUID of the member being profiled.
-            group_id:        UUID of the group.
-            messages:        All Message ORM objects for this member in the window.
-            topic_rows:      Objects with .topic_key (str) and .is_primary (bool).
-                             One row per (message, topic) assignment.
-            reply_targets:   Pre-resolved reply targets from ProfileService.
-                             Each entry: {"member_id": str, "display_name": str}.
-            profile_version: Version tag written to the snapshot row.
-            window_start:    Start of the analysis window (UTC).
-            window_end:      End of the analysis window (UTC).
+            member_id:          UUID of the member being profiled.
+            group_id:           UUID of the group.
+            messages:           All Message ORM objects for this member in the window.
+            topic_rows:         Objects with .topic_key (str) and .is_primary (bool).
+                                One row per (message, topic) assignment.
+                                Must already be filtered to the desired classifier_version
+                                by the caller (ProfileService._load_topic_rows).
+            reply_targets:      Pre-resolved reply targets from ProfileService.
+                                Each entry: {"member_id": str, "display_name": str}.
+            profile_version:    Version tag written to the snapshot row.
+            classifier_version: The topic classifier version whose assignments were
+                                used to build topic_rows.  Stored in stats for
+                                reproducibility – does NOT filter here (filtering
+                                is the service's responsibility).
+            window_start:       Start of the analysis window (UTC).
+            window_end:         End of the analysis window (UTC).
 
         Returns:
             ProfileData ready to be persisted by ProfileService.
@@ -170,6 +182,9 @@ class ProfileBuilder:
                 {**e, "member_id": str(e["member_id"])}
                 for e in interaction_top
             ],
+            # Traceability: record which classifier version's topics were consumed.
+            # This makes every profile_snapshot independently reproducible.
+            "classifier_version": classifier_version,
         }
 
         return ProfileData(

@@ -221,3 +221,65 @@ python scripts/run_profile_generation.py ... --rerun
 - Consider jieba for better Chinese tokenisation in `top_keywords`
 - Add adjacency-based interaction fallback when `reply_to_message_id` is sparse
 - Replace rule-template `persona_summary` with LLM-based generator (future)
+
+---
+
+## Profiling Module – Correctness Fixes (post-review)
+
+### Fix 1: Per-member savepoint transaction isolation
+
+**Problem**: All members shared one session/transaction. A `session.rollback()` on
+member N rolled back all previously flushed snapshots from members 1…N-1.
+
+**Fix**: Each member's write is wrapped in `session.begin_nested()` (SAVEPOINT).
+- Success → savepoint released into outer transaction
+- Failure → only that savepoint rolled back; outer transaction continues
+- Outer transaction committed after the loop
+
+`profiles_written` now always equals the actual rows in `profile_snapshots`.
+
+### Fix 2: classifier_version bound to topic statistics
+
+**Problem**: `_load_topic_rows()` had no `classifier_version` filter. Multiple
+classifier runs for the same message polluted topic distributions.
+
+**Fix**:
+- `ProfileService.run()` accepts explicit `classifier_version` (default: `CLASSIFIER_VERSION`)
+- `_load_topic_rows()` adds `MessageTopic.classifier_version == classifier_version` to the WHERE clause
+- `classifier_version` is stored in `profile_snapshots.stats["classifier_version"]` for traceability
+- CLI exposes `--classifier-version` flag
+
+**Semantic separation**:
+- `profile_version` → which profiling algorithm (stored in `profile_snapshots.profile_version`)
+- `classifier_version` → which topic classifier's rows to consume (stored in `stats`)
+
+### Fix 3: member_id / group_id consistency check
+
+`ProfileService._assert_member_in_group()` raises `ValueError` if the loaded
+member's `group_id` does not match the specified `group_id`. Called before any
+writes when both `member_id` and `group_id` are provided.
+
+### Fix 4: Missing topic mapping – no silent skip
+
+`_load_topic_rows()` now returns `(rows, missing_count)`. Missing topic IDs
+are counted, a `warnings.warn` is emitted per member, and `ProfilingResult`
+exposes `missing_topic_count`. The CLI prints it with a remediation hint.
+
+### Fix 5: Import coupling removed from `__init__.py`
+
+`src/profiling/__init__.py` no longer imports `ProfileService` / `ProfilingResult`.
+Pure modules (`profile_analyzers`, `profile_builder`) can be imported without
+triggering DB engine initialisation. Import `ProfileService` directly:
+```python
+from src.profiling.profile_service import ProfileService, ProfilingResult
+```
+
+### Test coverage for fixes (75 total, all pass)
+
+| Test class | What it verifies |
+|---|---|
+| `TestClassifierVersionInBuilder` | `classifier_version` stored in `stats`; different versions produce different profiles |
+| `TestMemberGroupConsistency` | `_assert_member_in_group` raises on mismatch / missing member |
+| `TestSavepointIsolationLogic` | Loop logic: failed member doesn't affect written count |
+| `TestTopicRowsClassifierVersionFilter` | SQL WHERE includes `classifier_version` |
+| `TestImportIsolation` | Pure modules importable without DB; `ProfileService` not in `__init__` |
