@@ -205,10 +205,13 @@ tests/
 ### Running Profile Generation
 
 ```bash
-# Primary entry point (window params optional – defaults to all time)
-python scripts/run_profiling.py --profile-version profile_v1
+# Window params are REQUIRED (idempotency: snapshot key includes window bounds)
+python scripts/run_profiling.py \
+    --profile-version profile_v1 \
+    --window-start 2000-01-01T00:00:00Z \
+    --window-end   2099-12-31T23:59:59Z
 
-# With explicit window
+# Restrict to one group + explicit year window
 python scripts/run_profiling.py \
     --group-id <uuid> \
     --profile-version profile_v1 \
@@ -218,13 +221,7 @@ python scripts/run_profiling.py \
 # Re-run (replace existing):
 python scripts/run_profiling.py ... --rerun
 
-# Lower-level script (window params required):
-python scripts/run_profile_generation.py \
-    --group-id <uuid> \
-    --profile-version profile_v1 \
-    --classifier-version rule_v1 \
-    --window-start 2026-01-01T00:00:00Z \
-    --window-end   2026-12-31T23:59:59Z
+# run_profile_generation.py is DEPRECATED – use run_profiling.py
 ```
 
 ### Next Steps for Persona Profile
@@ -295,3 +292,89 @@ from src.profiling.profile_service import ProfileService, ProfilingResult
 | `TestSavepointIsolationLogic` | Loop logic: failed member doesn't affect written count |
 | `TestTopicRowsClassifierVersionFilter` | SQL WHERE includes `classifier_version` |
 | `TestImportIsolation` | Pure modules importable without DB; `ProfileService` not in `__init__` |
+
+---
+
+## API Layer (Task 6)
+
+### Directory
+
+```
+src/api/
+  app.py            # FastAPI app, mounts all routers under /api/v1
+  deps.py           # get_db() dependency: yields Session per request
+  repository.py     # Read-only DB query functions (no business logic)
+  routes/
+    health.py       # GET /api/v1/health
+    groups.py       # GET /api/v1/groups, /{group_id}, /{group_id}/members
+    members.py      # GET /api/v1/members/{id}, /messages, /profile/latest, /profiles
+  schemas/
+    common.py       # PagedResponse[T] generic envelope
+    group.py        # GroupSchema
+    member.py       # MemberSchema
+    message.py      # MessageSchema
+    profile.py      # ProfileSnapshotSchema
+scripts/
+  run_api.py        # Launch script (uvicorn wrapper)
+tests/
+  test_api.py       # 31 tests, SQLite in-memory, no PostgreSQL required
+```
+
+### Endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/v1/health` | Liveness check |
+| GET | `/api/v1/groups` | All groups + member_count + message_count |
+| GET | `/api/v1/groups/{group_id}` | Single group by UUID |
+| GET | `/api/v1/groups/{group_id}/members` | Members in group + latest_profile_snapshot_at |
+| GET | `/api/v1/members/{member_id}` | Member + latest_profile_snapshot_at |
+| GET | `/api/v1/members/{member_id}/messages` | Paged messages (newest first) |
+| GET | `/api/v1/members/{member_id}/profile/latest` | Most recent profile snapshot |
+| GET | `/api/v1/members/{member_id}/profiles` | Paged profile history |
+
+### Pagination
+
+- **Messages**: `limit` (default 50, max 200) + `offset`. Ordered `sent_at DESC, id DESC`.
+  - Optional filters: `sent_at_gte`, `sent_at_lte` (ISO-8601 UTC).
+- **Profiles**: `limit` (default 20, max 100) + `offset`. Ordered `snapshot_at DESC`.
+  - Optional filter: `profile_version` (exact match).
+- All paged responses use `PagedResponse[T]` envelope: `{items, total, limit, offset}`.
+
+### Error Handling
+
+- 404 for unknown `group_id` / `member_id` / no profile snapshot.
+- 422 (FastAPI/Pydantic) for invalid query params (e.g. `limit=0`, `limit=9999`).
+- No global exception handler — FastAPI defaults are sufficient for MVP.
+
+### Starting the API
+
+```bash
+# Development (auto-reload)
+python scripts/run_api.py --reload
+
+# Production-style
+python scripts/run_api.py --host 127.0.0.1 --port 8000
+
+# Or directly:
+uvicorn src.api.app:app --host 0.0.0.0 --port 8000
+
+# Interactive docs:
+# http://localhost:8000/docs   (Swagger UI)
+# http://localhost:8000/redoc  (ReDoc)
+```
+
+### Design Constraints
+
+- **Read-only**: no POST/PUT/DELETE endpoints.
+- **No auth**: MVP only — add middleware later if needed.
+- **Low coupling**: `src/api/` depends only on `src/db/` (models + session).
+  It does NOT import from `ingest/`, `classification/`, or `profiling/`.
+- **Test isolation**: `StaticPool` + SQLite DDL (not `create_all`) avoids
+  PostgreSQL-specific type errors (JSONB/UUID) in tests.
+
+### Known Limitation
+
+- `test_ingest_service.py::test_txt_without_external_id_allows_duplicates`
+  was already failing before Task 6 (pre-existing ingest bug, not introduced here).
+  All 31 new API tests pass; 128/129 total tests pass.
