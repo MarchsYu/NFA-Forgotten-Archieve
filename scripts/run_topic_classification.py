@@ -100,6 +100,14 @@ def main() -> None:
     if result.messages_processed > 0:
         match_rate = (result.messages_processed - result.messages_unmatched) / result.messages_processed
         print(f"   Match rate                      : {match_rate:.1%}")
+    print()
+    print("ℹ️  Conflict / multi-topic strategy:")
+    print("   A message may match multiple topics simultaneously (e.g. 'casual_chat' + 'meme').")
+    print("   All matched topics are written to message_topics (full signal preserved).")
+    print("   is_primary=True is set on exactly one topic per message, chosen as follows:")
+    print("     1. Only topics with is_primary_eligible=True are candidates.")
+    print("     2. Highest confidence wins; ties broken by taxonomy definition order.")
+    print("     3. Fallback: if no eligible candidate, highest-confidence match overall wins.")
 
 
 if __name__ == "__main__":

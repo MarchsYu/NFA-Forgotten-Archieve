@@ -104,6 +104,40 @@ class TestTopicClassifier:
             kws = casual.evidence["matched_keywords"]
             assert len(kws) == len(set(kws)), "Duplicate keywords in evidence"
 
+    def test_evidence_contains_matched_excerpt(self):
+        matches = self.clf.classify("这个 bug 怎么修？")
+        tech = next(m for m in matches if m.topic_key == "technical")
+        assert "matched_excerpt" in tech.evidence
+        assert isinstance(tech.evidence["matched_excerpt"], str)
+        assert len(tech.evidence["matched_excerpt"]) > 0
+
+    def test_matched_excerpt_contains_keyword(self):
+        matches = self.clf.classify("这个 bug 怎么修？")
+        tech = next(m for m in matches if m.topic_key == "technical")
+        # The excerpt should contain the matched keyword (case-insensitive)
+        excerpt = tech.evidence["matched_excerpt"].lower()
+        assert "bug" in excerpt
+
+    def test_matched_excerpt_empty_on_no_text(self):
+        clf = TopicClassifier()
+        result = clf._extract_excerpt("", ["bug"])
+        assert result == ""
+
+    def test_matched_excerpt_ellipsis_for_long_text(self):
+        # Text longer than window on both sides should get "…" markers
+        long_text = "x" * 50 + "bug" + "y" * 50
+        result = TopicClassifier._extract_excerpt(long_text, ["bug"])
+        assert result.startswith("…")
+        assert result.endswith("…")
+        assert "bug" in result
+
+    def test_matched_excerpt_no_ellipsis_for_short_text(self):
+        short_text = "bug"
+        result = TopicClassifier._extract_excerpt(short_text, ["bug"])
+        assert not result.startswith("…")
+        assert not result.endswith("…")
+        assert result == "bug"
+
 
 # ---------------------------------------------------------------------------
 # Keyset pagination regression test (no DB needed)

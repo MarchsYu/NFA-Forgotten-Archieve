@@ -33,6 +33,7 @@ Evidence format
     "matched_keywords": ["kw1", "kw2"],       # deduplicated union
     "strong_matched_keywords": ["kw1"],        # strong hits only
     "weak_matched_keywords": ["kw2"],          # weak hits only
+    "matched_excerpt": "…surrounding text…",  # snippet around first keyword hit
 }
 """
 
@@ -110,6 +111,7 @@ class TopicClassifier:
                 "matched_keywords": all_hits,
                 "strong_matched_keywords": strong_hits,
                 "weak_matched_keywords": weak_hits,
+                "matched_excerpt": self._extract_excerpt(text, all_hits),
             }
 
             matches.append(TopicMatch(
@@ -141,3 +143,27 @@ class TopicClassifier:
 
         raw = min(base + extra, MAX_CONFIDENCE)
         return Decimal(str(round(raw, 4)))
+
+    @staticmethod
+    def _extract_excerpt(text: str, keywords: list, window: int = 30) -> str:
+        """
+        Return a short snippet of *text* centred on the first matched keyword.
+
+        Searches case-insensitively. Pads with "…" when the match is not at
+        the start or end of the text. Returns "" if no keyword is found.
+        """
+        if not keywords or not text:
+            return ""
+        lowered = text.lower()
+        for kw in keywords:
+            pos = lowered.find(kw.lower())
+            if pos >= 0:
+                start = max(0, pos - window)
+                end = min(len(text), pos + len(kw) + window)
+                excerpt = text[start:end]
+                if start > 0:
+                    excerpt = "…" + excerpt
+                if end < len(text):
+                    excerpt = excerpt + "…"
+                return excerpt
+        return ""
