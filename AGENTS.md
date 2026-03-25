@@ -205,14 +205,26 @@ tests/
 ### Running Profile Generation
 
 ```bash
-python scripts/run_profile_generation.py \
+# Primary entry point (window params optional – defaults to all time)
+python scripts/run_profiling.py --profile-version profile_v1
+
+# With explicit window
+python scripts/run_profiling.py \
     --group-id <uuid> \
     --profile-version profile_v1 \
     --window-start 2026-01-01T00:00:00Z \
     --window-end   2026-12-31T23:59:59Z
 
 # Re-run (replace existing):
-python scripts/run_profile_generation.py ... --rerun
+python scripts/run_profiling.py ... --rerun
+
+# Lower-level script (window params required):
+python scripts/run_profile_generation.py \
+    --group-id <uuid> \
+    --profile-version profile_v1 \
+    --classifier-version rule_v1 \
+    --window-start 2026-01-01T00:00:00Z \
+    --window-end   2026-12-31T23:59:59Z
 ```
 
 ### Next Steps for Persona Profile

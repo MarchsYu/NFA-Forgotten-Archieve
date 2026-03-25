@@ -695,3 +695,45 @@ class TestImportIsolation:
             "ProfileService should not be exported from src.profiling.__init__. "
             "Import it directly: from src.profiling.profile_service import ProfileService"
         )
+
+
+# ---------------------------------------------------------------------------
+# 15. run_profiling.py CLI argument parsing (no DB, no subprocess)
+# ---------------------------------------------------------------------------
+
+class TestRunProfilingCLI:
+    """
+    Verify run_profiling.py argument parsing logic without invoking a DB.
+
+    Imports the script's _parse_datetime helper and checks window defaults.
+    """
+
+    def _import_script(self):
+        import importlib.util, sys
+        from pathlib import Path
+        script_path = Path(__file__).parent.parent / "scripts" / "run_profiling.py"
+        spec = importlib.util.spec_from_file_location("run_profiling", script_path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_parse_datetime_z_suffix(self):
+        mod = self._import_script()
+        dt = mod._parse_datetime("2026-06-01T12:00:00Z")
+        assert dt.tzinfo is not None
+        assert dt.year == 2026
+
+    def test_parse_datetime_offset(self):
+        mod = self._import_script()
+        dt = mod._parse_datetime("2026-06-01T12:00:00+00:00")
+        assert dt.tzinfo is not None
+
+    def test_all_time_start_constant(self):
+        mod = self._import_script()
+        assert mod._ALL_TIME_START.year == 2000
+        assert mod._ALL_TIME_START.tzinfo is not None
+
+    def test_script_has_main_function(self):
+        mod = self._import_script()
+        assert callable(getattr(mod, "main", None))
+
