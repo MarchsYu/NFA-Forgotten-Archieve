@@ -144,3 +144,80 @@ The classification module is ready when:
 
 **Current status**: ✅ Ready to proceed to Persona Profile once real-data
 validation is done.
+
+---
+
+## Profiling Module (Task 5)
+
+### Directory
+
+```
+src/profiling/
+  __init__.py            # re-exports ProfileBuilder, ProfileData, ProfileService, ProfilingResult
+  profile_analyzers.py   # pure analysis functions (no DB)
+  profile_builder.py     # ProfileData dataclass + ProfileBuilder (no DB)
+  profile_service.py     # DB orchestration: load → build → write
+scripts/
+  run_profile_generation.py  # CLI entry point
+tests/
+  test_profiling.py      # 44 unit tests, no DB required
+```
+
+### Analysis Dimensions (profile_v1)
+
+**stats** (raw numbers, stored in JSONB):
+| Field | Description |
+|---|---|
+| `message_count` | Total messages in window |
+| `avg_message_length` | Average character count |
+| `top_keywords` | `[{word, count}]` top-10 tokens, stopwords removed |
+| `topic_distribution` | `{topic_key: count}` primary-topic assignments only |
+| `all_topics_distribution` | `{topic_key: count}` all matched topics |
+| `active_hours` | `{"0": n, ..., "23": n}` message volume by hour |
+| `interaction_top` | `[{member_id, display_name, count}]` reply-based, top-5 |
+
+**traits** (derived labels, stored in JSONB):
+| Field | Values |
+|---|---|
+| `dominant_topics` | Top-5 topic_keys by primary count |
+| `verbosity_level` | `"terse"` (<20 chars) / `"moderate"` (20-80) / `"verbose"` (>80) |
+| `style_hints` | `["emoji_user", "question_asker", "meme_lover", "tech_talker"]` |
+| `activity_pattern` | `"morning"` / `"afternoon"` / `"evening"` / `"night"` / `"mixed"` |
+
+### Idempotency / Rerun
+
+- Unique constraint: `(member_id, profile_version, window_start, window_end)`
+- Incremental (default): skip members who already have a snapshot
+- Rerun (`rerun=True`): delete matching snapshots, then re-generate
+
+### Interaction Top Strategy
+
+1. Primary: use `reply_to_message_id` — look up the sender of the replied-to message
+2. Fallback: empty list (adjacency-based approximation not implemented in v1)
+
+### Keyword Extraction
+
+- Split on whitespace + CJK/ASCII punctuation
+- Filter: ASCII tokens < 3 chars dropped; CJK tokens < 2 chars dropped
+- Minimal stopword sets (Chinese + English) applied
+- No external NLP library required
+
+### Running Profile Generation
+
+```bash
+python scripts/run_profile_generation.py \
+    --group-id <uuid> \
+    --profile-version profile_v1 \
+    --window-start 2026-01-01T00:00:00Z \
+    --window-end   2026-12-31T23:59:59Z
+
+# Re-run (replace existing):
+python scripts/run_profile_generation.py ... --rerun
+```
+
+### Next Steps for Persona Profile
+
+- Validate on real dataset (requires DB + seeded topics + classified messages)
+- Consider jieba for better Chinese tokenisation in `top_keywords`
+- Add adjacency-based interaction fallback when `reply_to_message_id` is sparse
+- Replace rule-template `persona_summary` with LLM-based generator (future)
