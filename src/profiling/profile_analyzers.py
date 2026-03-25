@@ -171,7 +171,15 @@ def compute_topic_distribution(
 
 def compute_active_hours(messages: List[Any]) -> Dict[str, int]:
     """
-    Count messages per hour-of-day (0-23) using sent_at (UTC).
+    Count messages per hour-of-day (0-23) using sent_at in UTC.
+
+    Time-zone note
+    --------------
+    All ``sent_at`` values are stored as UTC in the database (the ingest
+    module normalises timestamps to UTC before writing).  This function
+    reads ``sent_at.hour`` directly, which is the UTC hour.  No additional
+    conversion is performed.  Callers that want local-time bucketing must
+    convert ``sent_at`` before passing messages to this function.
 
     Returns:
         {"0": int, "1": int, ..., "23": int}

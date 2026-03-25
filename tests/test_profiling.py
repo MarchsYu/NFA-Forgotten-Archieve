@@ -13,6 +13,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, List
 from unittest.mock import MagicMock
@@ -705,11 +706,12 @@ class TestRunProfilingCLI:
     """
     Verify run_profiling.py argument parsing logic without invoking a DB.
 
-    Imports the script's _parse_datetime helper and checks window defaults.
+    Imports the script's _parse_datetime helper and checks that window
+    params are required (idempotency fix).
     """
 
     def _import_script(self):
-        import importlib.util, sys
+        import importlib.util
         from pathlib import Path
         script_path = Path(__file__).parent.parent / "scripts" / "run_profiling.py"
         spec = importlib.util.spec_from_file_location("run_profiling", script_path)
@@ -728,10 +730,24 @@ class TestRunProfilingCLI:
         dt = mod._parse_datetime("2026-06-01T12:00:00+00:00")
         assert dt.tzinfo is not None
 
-    def test_all_time_start_constant(self):
-        mod = self._import_script()
-        assert mod._ALL_TIME_START.year == 2000
-        assert mod._ALL_TIME_START.tzinfo is not None
+    def test_window_params_are_required(self):
+        """
+        run_profiling.py must require --window-start and --window-end.
+        Omitting them must cause argparse to exit (non-zero), not silently
+        default to 'now', which would break idempotency.
+        """
+        import subprocess, sys
+        result = subprocess.run(
+            [sys.executable, "scripts/run_profiling.py", "--profile-version", "profile_v1"],
+            capture_output=True,
+            text=True,
+            cwd=str(Path(__file__).parent.parent),
+        )
+        # argparse exits with code 2 when required args are missing
+        assert result.returncode != 0, (
+            "run_profiling.py must exit non-zero when --window-start/--window-end are missing"
+        )
+        assert "window-start" in result.stderr or "window-end" in result.stderr
 
     def test_script_has_main_function(self):
         mod = self._import_script()

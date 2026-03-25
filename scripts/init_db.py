@@ -37,7 +37,7 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from src.db.base import Base
-from src.db.session import engine
+from src.db.session import get_engine
 from src.db.models import (
     Group,
     Member,
@@ -50,6 +50,7 @@ from src.db.models import (
 
 def init_db():
     """Create all tables in the database."""
+    engine = get_engine()
     print("Initializing database...")
     print(f"Database URL: {engine.url}")
     

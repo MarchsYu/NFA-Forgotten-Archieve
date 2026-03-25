@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
 """
+[DEPRECATED] Use scripts/run_profiling.py instead.
+
+This script is kept for backward compatibility only.
+run_profiling.py is the canonical entry point and has identical functionality.
+
 Generate Persona Profiles for group members and write them to profile_snapshots.
 
 Usage
