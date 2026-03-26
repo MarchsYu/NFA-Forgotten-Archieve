@@ -271,13 +271,14 @@ class TestGroups:
     def test_list_groups_returns_200(self, client: TestClient):
         r = client.get("/api/v1/groups")
         assert r.status_code == 200
-        groups = r.json()
-        assert isinstance(groups, list)
-        assert len(groups) >= 1
+        body = r.json()
+        assert "items" in body
+        assert "total" in body
+        assert len(body["items"]) >= 1
 
     def test_list_groups_has_aggregates(self, client: TestClient):
         r = client.get("/api/v1/groups")
-        group = next(g for g in r.json() if g["id"] == str(_GROUP_ID))
+        group = next(g for g in r.json()["items"] if g["id"] == str(_GROUP_ID))
         assert group["member_count"] == 2
         assert group["message_count"] == 4
 
@@ -294,9 +295,9 @@ class TestGroups:
     def test_list_group_members(self, client: TestClient):
         r = client.get(f"/api/v1/groups/{_GROUP_ID}/members")
         assert r.status_code == 200
-        members = r.json()
-        assert len(members) == 2
-        names = {m["display_name"] for m in members}
+        body = r.json()
+        assert body["total"] == 2
+        names = {m["display_name"] for m in body["items"]}
         assert names == {"Alice", "Bob"}
 
     def test_list_group_members_group_not_found(self, client: TestClient):
@@ -305,12 +306,12 @@ class TestGroups:
 
     def test_alice_has_latest_snapshot_at(self, client: TestClient):
         r = client.get(f"/api/v1/groups/{_GROUP_ID}/members")
-        alice = next(m for m in r.json() if m["display_name"] == "Alice")
+        alice = next(m for m in r.json()["items"] if m["display_name"] == "Alice")
         assert alice["latest_profile_snapshot_at"] is not None
 
     def test_bob_has_no_snapshot(self, client: TestClient):
         r = client.get(f"/api/v1/groups/{_GROUP_ID}/members")
-        bob = next(m for m in r.json() if m["display_name"] == "Bob")
+        bob = next(m for m in r.json()["items"] if m["display_name"] == "Bob")
         assert bob["latest_profile_snapshot_at"] is None
 
 
@@ -396,6 +397,14 @@ class TestMessages:
             "?sent_at_gte=2026-06-15T11:00:00Z"
         )
         assert r.json()["total"] == 2
+
+    def test_list_messages_invalid_time_range(self, client: TestClient):
+        # gte > lte should return 422
+        r = client.get(
+            f"/api/v1/members/{_MEMBER_A_ID}/messages"
+            "?sent_at_gte=2026-06-15T12:00:00Z&sent_at_lte=2026-06-15T10:00:00Z"
+        )
+        assert r.status_code == 422
 
     def test_message_schema_fields(self, client: TestClient):
         r = client.get(f"/api/v1/members/{_MEMBER_A_ID}/messages?limit=1")

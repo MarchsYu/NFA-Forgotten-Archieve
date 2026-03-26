@@ -317,7 +317,7 @@ src/api/
 scripts/
   run_api.py        # Launch script (uvicorn wrapper)
 tests/
-  test_api.py       # 31 tests, SQLite in-memory, no PostgreSQL required
+  test_api.py       # 32 tests, SQLite in-memory, no PostgreSQL required
 ```
 
 ### Endpoints
@@ -335,9 +335,12 @@ tests/
 
 ### Pagination
 
+- **Groups**: `limit` (default 100, max 500) + `offset`. Ordered `name ASC`. Returns `PagedResponse[GroupSchema]`.
+- **Group Members**: `limit` (default 100, max 500) + `offset`. Ordered `display_name ASC`. Returns `PagedResponse[MemberSchema]`.
 - **Messages**: `limit` (default 50, max 200) + `offset`. Ordered `sent_at DESC, id DESC`.
   - Optional filters: `sent_at_gte`, `sent_at_lte` (ISO-8601 UTC).
-- **Profiles**: `limit` (default 20, max 100) + `offset`. Ordered `snapshot_at DESC`.
+  - Cross-field validation: `sent_at_gte > sent_at_lte` → HTTP 422.
+- **Profiles**: `limit` (default 20, max 100) + `offset`. Ordered `snapshot_at DESC, id DESC` (stable).
   - Optional filter: `profile_version` (exact match).
 - All paged responses use `PagedResponse[T]` envelope: `{items, total, limit, offset}`.
 
@@ -345,6 +348,7 @@ tests/
 
 - 404 for unknown `group_id` / `member_id` / no profile snapshot.
 - 422 (FastAPI/Pydantic) for invalid query params (e.g. `limit=0`, `limit=9999`).
+- 422 for cross-field violations (e.g. `sent_at_gte > sent_at_lte`).
 - No global exception handler — FastAPI defaults are sufficient for MVP.
 
 ### Starting the API
@@ -377,4 +381,16 @@ uvicorn src.api.app:app --host 0.0.0.0 --port 8000
 
 - `test_ingest_service.py::test_txt_without_external_id_allows_duplicates`
   was already failing before Task 6 (pre-existing ingest bug, not introduced here).
-  All 31 new API tests pass; 128/129 total tests pass.
+  All 32 API tests pass; 129/130 total tests pass.
+
+### Dependencies
+
+- `requirements.txt`: runtime deps (fastapi, uvicorn, sqlalchemy, pydantic, python-dotenv, psycopg2-binary)
+- `requirements-dev.txt`: `-r requirements.txt` + pytest, httpx, anyio
+- Install: `pip install -r requirements-dev.txt`
+
+### limit cap — Authority Layer
+
+- **Route layer** (FastAPI `Query(ge=1, le=MAX)`) is the **authority**: returns HTTP 422 for out-of-range values before the request reaches the repository.
+- **Repository layer** also clamps with `min(max(1, limit), MAX)` as a safety net for direct programmatic calls.
+- No logic conflict: route rejects bad values early; repository never sees them in normal API flow.

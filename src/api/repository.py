@@ -30,12 +30,24 @@ from src.db.models import Group, Member, Message, ProfileSnapshot
 # Groups
 # ---------------------------------------------------------------------------
 
-def get_groups(session: Session) -> List[Tuple[Group, int, int]]:
-    """
-    Return all groups with member_count and message_count aggregates.
+_GROUP_DEFAULT_LIMIT = 100
+_GROUP_MAX_LIMIT = 500
 
-    Returns a list of (Group, member_count, message_count) tuples.
+
+def get_groups(
+    session: Session,
+    limit: int = _GROUP_DEFAULT_LIMIT,
+    offset: int = 0,
+) -> Tuple[List[Tuple[Group, int, int]], int]:
     """
+    Return (groups_with_aggregates, total_count).
+
+    Each element of the list is a (Group, member_count, message_count) tuple.
+    Ordered by Group.name; paginated with limit/offset.
+    """
+    limit = min(max(1, limit), _GROUP_MAX_LIMIT)
+    offset = max(0, offset)
+
     member_count_sq = (
         select(func.count(Member.id))
         .where(Member.group_id == Group.id)
@@ -48,11 +60,14 @@ def get_groups(session: Session) -> List[Tuple[Group, int, int]]:
         .correlate(Group)
         .scalar_subquery()
     )
+    total: int = session.execute(select(func.count(Group.id))).scalar_one()
     rows = session.execute(
         select(Group, member_count_sq.label("mc"), message_count_sq.label("msgc"))
         .order_by(Group.name)
+        .limit(limit)
+        .offset(offset)
     ).all()
-    return [(row.Group, row.mc, row.msgc) for row in rows]
+    return [(row.Group, row.mc, row.msgc) for row in rows], total
 
 
 def get_group_by_id(session: Session, group_id: uuid.UUID) -> Optional[Group]:
@@ -63,27 +78,42 @@ def get_group_by_id(session: Session, group_id: uuid.UUID) -> Optional[Group]:
 # Members
 # ---------------------------------------------------------------------------
 
+_MEMBER_DEFAULT_LIMIT = 100
+_MEMBER_MAX_LIMIT = 500
+
+
 def get_members_by_group(
     session: Session,
     group_id: uuid.UUID,
-) -> List[Tuple[Member, Optional[datetime]]]:
+    limit: int = _MEMBER_DEFAULT_LIMIT,
+    offset: int = 0,
+) -> Tuple[List[Tuple[Member, Optional[datetime]]], int]:
     """
-    Return all members in a group with their latest profile snapshot_at.
+    Return (members_with_latest_snap, total_count) for a group.
 
-    Returns a list of (Member, latest_snapshot_at | None) tuples.
+    Each element is a (Member, latest_snapshot_at | None) tuple.
+    Ordered by Member.display_name; paginated with limit/offset.
     """
+    limit = min(max(1, limit), _MEMBER_MAX_LIMIT)
+    offset = max(0, offset)
+
     latest_snap_sq = (
         select(func.max(ProfileSnapshot.snapshot_at))
         .where(ProfileSnapshot.member_id == Member.id)
         .correlate(Member)
         .scalar_subquery()
     )
+    total: int = session.execute(
+        select(func.count(Member.id)).where(Member.group_id == group_id)
+    ).scalar_one()
     rows = session.execute(
         select(Member, latest_snap_sq.label("latest_snap"))
         .where(Member.group_id == group_id)
         .order_by(Member.display_name)
+        .limit(limit)
+        .offset(offset)
     ).all()
-    return [(row.Member, row.latest_snap) for row in rows]
+    return [(row.Member, row.latest_snap) for row in rows], total
 
 
 def get_member_by_id(
@@ -200,7 +230,7 @@ def get_profiles_by_member(
     ).scalar_one()
 
     snapshots = session.execute(
-        base.order_by(ProfileSnapshot.snapshot_at.desc())
+        base.order_by(ProfileSnapshot.snapshot_at.desc(), ProfileSnapshot.id.desc())
         .limit(limit)
         .offset(offset)
     ).scalars().all()
@@ -216,6 +246,6 @@ def get_latest_profile(
     return session.execute(
         select(ProfileSnapshot)
         .where(ProfileSnapshot.member_id == member_id)
-        .order_by(ProfileSnapshot.snapshot_at.desc())
+        .order_by(ProfileSnapshot.snapshot_at.desc(), ProfileSnapshot.id.desc())
         .limit(1)
     ).scalars().first()

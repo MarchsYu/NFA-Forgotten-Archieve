@@ -80,6 +80,13 @@ def list_member_messages(
     if row is None:
         raise HTTPException(status_code=404, detail=f"Member {member_id} not found")
 
+    # Cross-field validation: gte must not be later than lte
+    if sent_at_gte is not None and sent_at_lte is not None and sent_at_gte > sent_at_lte:
+        raise HTTPException(
+            status_code=422,
+            detail="sent_at_gte must not be later than sent_at_lte",
+        )
+
     messages, total = repo.get_messages_by_member(
         session, member_id,
         limit=limit, offset=offset,
