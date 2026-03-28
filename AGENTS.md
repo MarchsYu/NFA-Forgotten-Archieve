@@ -28,15 +28,22 @@ src/
     topic_rules.py           # Taxonomy: 8 TopicDefinition objects + confidence constants
     topic_classifier.py      # TopicClassifier.classify() → List[TopicMatch]
     classification_service.py # ClassificationService.run() → ClassificationResult
+  processing/
+    pipeline_types.py        # PipelineParams dataclass (all pipeline inputs)
+    pipeline_result.py       # StageResult types + PipelineResult
+    pipeline.py              # run_stage1_pipeline() – main orchestrator
+    __init__.py              # re-exports public API
 scripts/
   init_db.py                 # create_all()
   init_topics.py             # seed topics table from topic_rules.TOPICS
   import_chat.py             # CLI wrapper for IngestService
   run_topic_classification.py # CLI wrapper for ClassificationService
+  run_stage1_pipeline.py     # Stage 1 full-chain CLI entry point
 tests/
   test_classification.py     # 17 unit tests, no DB required
   test_ingest_service.py
   test_parsers.py
+  test_pipeline.py           # 37 unit tests for processing layer, no DB required
 ```
 
 ## Running Tests
@@ -394,3 +401,135 @@ uvicorn src.api.app:app --host 0.0.0.0 --port 8000
 - **Route layer** (FastAPI `Query(ge=1, le=MAX)`) is the **authority**: returns HTTP 422 for out-of-range values before the request reaches the repository.
 - **Repository layer** also clamps with `min(max(1, limit), MAX)` as a safety net for direct programmatic calls.
 - No logic conflict: route rejects bad values early; repository never sees them in normal API flow.
+
+---
+
+## Processing Module – Stage 1 Orchestration (Task 7)
+
+### Directory
+
+```
+src/processing/
+  __init__.py          # re-exports PipelineParams, PipelineResult, run_stage1_pipeline
+  pipeline_types.py    # PipelineParams dataclass (all pipeline inputs)
+  pipeline_result.py   # IngestStageResult, TopicsInitStageResult,
+                       # ClassificationStageResult, ProfilingStageResult, PipelineResult
+  pipeline.py          # run_stage1_pipeline() + private stage runners
+scripts/
+  run_stage1_pipeline.py  # CLI entry point for the full Stage 1 chain
+tests/
+  test_pipeline.py     # 37 unit tests, no DB required
+```
+
+### Stage Sequence
+
+```
+Step 1: ingest          → IngestService.ingest_file()
+Step 2: topics_init     → idempotent DB seed (inline, same logic as init_topics.py)
+Step 3: classification  → ClassificationService.run()
+Step 4: profiling       → ProfileService.run()
+```
+
+### Key Design Decisions
+
+**Error-handling strategy**: Default is **abort on first failure** (`continue_on_error=False`).
+Remaining stages are recorded as `"skipped"` with an explanatory message.
+Set `continue_on_error=True` to attempt all stages regardless; `overall_status` becomes `"partial"`.
+
+**Topics init is automatic**: `topics_init` always runs before classification (unless
+classification is skipped). It is idempotent – existing topics are left untouched.
+Users never need to manually run `init_topics.py` before the pipeline.
+
+**topics_init failure aborts classification**: If topics can't be seeded, classification
+would fail anyway (no topic_id map). The abort propagates naturally.
+
+**Dry-run mode**: `dry_run=True` prints what would execute without touching the DB.
+Returns `overall_status="dry_run"`.
+
+**Session safety in topics_init**: `session = None` before the try block; `SessionLocal()`
+is called inside the try so DB connection errors are caught and returned as `StageResult(status="failed")`.
+
+### PipelineParams Reference
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `input_file` | `Optional[Path]` | `None` | Chat log file (.json/.csv/.txt) |
+| `platform` | `Optional[str]` | `None` | Platform hint (qq/wechat/discord/generic) |
+| `group_name` | `Optional[str]` | `None` | Group name override (required for .txt) |
+| `classifier_version` | `str` | `CLASSIFIER_VERSION` | Classification version tag |
+| `rerun_classification` | `bool` | `False` | Delete + redo classification |
+| `profile_version` | `str` | `PROFILE_VERSION` | Profiling algorithm version |
+| `window_start` | `Optional[datetime]` | `None` | Required for profiling |
+| `window_end` | `Optional[datetime]` | `None` | Required for profiling |
+| `rerun_profiling` | `bool` | `False` | Delete + redo profiling |
+| `group_id` | `Optional[UUID]` | `None` | Restrict classification + profiling |
+| `member_id` | `Optional[UUID]` | `None` | Restrict profiling (requires group_id) |
+| `skip_ingest` | `bool` | `False` | Skip ingest stage |
+| `skip_classification` | `bool` | `False` | Skip classification stage |
+| `skip_profiling` | `bool` | `False` | Skip profiling stage |
+| `dry_run` | `bool` | `False` | Print plan, don't execute |
+| `continue_on_error` | `bool` | `False` | Continue after stage failure |
+
+### PipelineResult.overall_status Values
+
+| Value | Meaning |
+|---|---|
+| `"success"` | All non-skipped stages completed without error |
+| `"partial"` | At least one stage failed; `continue_on_error=True` allowed others to run |
+| `"failed"` | At least one stage failed; pipeline was aborted |
+| `"dry_run"` | `dry_run=True`; no stages executed |
+
+### Exit Codes (run_stage1_pipeline.py)
+
+| Code | Meaning |
+|---|---|
+| `0` | success or dry_run |
+| `1` | failed |
+| `2` | partial (some stages failed, continue_on_error=True) |
+
+### Running the Pipeline
+
+```bash
+# Full run
+python scripts/run_stage1_pipeline.py \
+    --input-file data/raw/chat.json \
+    --platform qq \
+    --window-start 2026-01-01T00:00:00Z \
+    --window-end   2026-12-31T23:59:59Z
+
+# Skip ingest (data already in DB), rerun classification + profiling
+python scripts/run_stage1_pipeline.py \
+    --skip-ingest \
+    --rerun-classification --rerun-profiling \
+    --window-start 2026-01-01T00:00:00Z \
+    --window-end   2026-12-31T23:59:59Z
+
+# Dry run
+python scripts/run_stage1_pipeline.py \
+    --input-file data/raw/chat.json --platform qq \
+    --window-start 2026-01-01T00:00:00Z --window-end 2026-12-31T23:59:59Z \
+    --dry-run
+
+# Restrict to one group, continue even if a stage fails
+python scripts/run_stage1_pipeline.py \
+    --skip-ingest \
+    --group-id <uuid> \
+    --window-start 2026-01-01T00:00:00Z --window-end 2026-12-31T23:59:59Z \
+    --continue-on-error
+```
+
+### Test Count (Task 7)
+
+- 37 new tests in `tests/test_pipeline.py` (no DB required)
+- Total: 166 pass, 1 pre-existing failure (ingest TXT dedup bug, unchanged)
+
+### Known Limitations / Future Work
+
+- Pipeline is **serial** (single-machine, single-process). Replace `run_stage1_pipeline()`
+  with a task-queue dispatcher (Celery, etc.) when background execution is needed.
+- No persistent run log. Add a `pipeline_runs` table if audit history is required.
+- `topics_init` is inlined in `pipeline.py`. If the taxonomy grows complex, extract
+  to `src/processing/topic_init_service.py`.
+- `window_start` / `window_end` are required for profiling even in `--skip-profiling`
+  mode when called via the library API (only the CLI enforces the skip guard).
+
