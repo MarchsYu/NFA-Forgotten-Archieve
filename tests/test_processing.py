@@ -464,7 +464,7 @@ class TestTopicServiceCanonical:
         from pathlib import Path
 
         script_path = Path(__file__).parent.parent / "scripts" / "init_topics.py"
-        source = script_path.read_text()
+        source = script_path.read_text(encoding="utf-8")
         assert "from src.classification.topic_service import" in source
         # Must NOT contain its own Topic seeding logic
         assert "session.add(Topic(" not in source
