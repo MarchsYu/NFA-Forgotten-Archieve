@@ -22,21 +22,56 @@ src/
   db/
     base.py                  # DeclarativeBase
     session.py               # engine + SessionLocal
-    models/                  # Group, Member, Message, Topic, MessageTopic, ProfileSnapshot
+    models/                  # Group, Member, Message, Topic, MessageTopic, ProfileSnapshot, LegendMember
   ingest/                    # Chat log parsers + IngestService (DO NOT MODIFY)
   classification/
     topic_rules.py           # Taxonomy: 8 TopicDefinition objects + confidence constants
     topic_classifier.py      # TopicClassifier.classify() → List[TopicMatch]
     classification_service.py # ClassificationService.run() → ClassificationResult
+    topic_service.py         # init_topics() – single canonical topic-init entry point
+  profiling/
+    profile_analyzers.py     # pure analysis functions
+    profile_builder.py       # ProfileData + ProfileBuilder
+    profile_service.py       # DB orchestration
+  legend/
+    __init__.py              # no re-exports (avoids DB side-effects on import)
+    archive_policy.py        # pure eligibility + state-transition guards
+    legend_repository.py     # DB reads/writes for legend_members
+    legend_schemas.py        # ArchiveResult, RestoreResult, SimulationToggleResult, LegendMemberSchema
+    legend_service.py        # LegendService: archive/restore/enable-sim/disable-sim/list
+  api/
+    app.py                   # FastAPI app (v0.2.0), mounts all routers
+    deps.py                  # get_db() dependency
+    repository.py            # read-only query functions
+    routes/
+      health.py              # GET /api/v1/health
+      groups.py              # GET /api/v1/groups, /{group_id}, /{group_id}/members
+      members.py             # GET /api/v1/members/{id}, /messages, /profile/latest, /profiles
+      legend.py              # Legend Archive endpoints (GET + POST)
+    schemas/
+      common.py              # PagedResponse[T]
+      group.py / member.py / message.py / profile.py / (legend in legend_schemas.py)
+  processing/
+    pipeline.py              # PipelineParams, StageOutcome, PipelineResult, run_stage1_pipeline()
 scripts/
   init_db.py                 # create_all()
-  init_topics.py             # seed topics table from topic_rules.TOPICS
+  init_topics.py             # thin CLI wrapper → topic_service.init_topics()
   import_chat.py             # CLI wrapper for IngestService
   run_topic_classification.py # CLI wrapper for ClassificationService
+  run_profiling.py           # CLI wrapper for ProfileService
+  run_pipeline.py            # unified Stage-1 pipeline CLI
+  archive_member.py          # archive a member into Legend Archive
+  list_legend_members.py     # list legend members with filters
+  toggle_legend_simulation.py # enable/disable simulation for a legend member
+  restore_legend_member.py   # restore an archived legend member
 tests/
   test_classification.py     # 17 unit tests, no DB required
   test_ingest_service.py
   test_parsers.py
+  test_profiling.py          # 75 unit tests, no DB required
+  test_api.py                # 32 API tests, SQLite in-memory
+  test_processing.py         # 29 unit tests, no DB required
+  test_legend.py             # 46 unit tests (policy + service + API), SQLite in-memory
 ```
 
 ## Running Tests
@@ -503,3 +538,110 @@ python scripts/run_pipeline.py --skip ingest --log-level INFO \
 - [x] Full test suite: 158 pass, 1 pre-existing failure (ingest TXT dedup bug)
 
 **Current status**: ✅ Stage-1 pipeline is stable and closed-loop.
+
+---
+
+## Legend Archive Module (Phase 2, Task 1)
+
+### Directory
+
+```
+src/legend/
+  __init__.py          # no re-exports (pure modules importable without DB)
+  archive_policy.py    # pure eligibility + state-transition guards (no DB)
+  legend_repository.py # DB reads/writes for legend_members
+  legend_schemas.py    # ArchiveResult, RestoreResult, SimulationToggleResult, LegendMemberSchema
+  legend_service.py    # LegendService: archive/restore/enable-sim/disable-sim/list
+scripts/
+  archive_member.py          # archive a member
+  list_legend_members.py     # list with filters
+  toggle_legend_simulation.py # enable/disable simulation
+  restore_legend_member.py   # restore an archived member
+tests/
+  test_legend.py       # 46 unit tests (policy + service + API), SQLite in-memory
+```
+
+### legend_members Table
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | UUID PK | |
+| `member_id` | UUID FK → members.id | UNIQUE – one row per member |
+| `group_id` | UUID FK → groups.id | |
+| `archive_status` | String(32) | `"archived"` / `"restored"` |
+| `archived_at` | DateTime(tz) | NOT NULL |
+| `archived_reason` | Text | nullable |
+| `archived_by` | String(255) | nullable |
+| `source_profile_snapshot_id` | UUID FK → profile_snapshots.id | nullable; SET NULL on delete |
+| `member_display_name_snapshot` | String(255) | denormalised identity |
+| `member_external_id_snapshot` | String(255) | nullable |
+| `member_status_snapshot` | String(32) | nullable |
+| `simulation_enabled` | Boolean | default False |
+| `created_at` / `updated_at` | DateTime(tz) | server_default + explicit on insert |
+
+Indexes: `(group_id, archive_status, archived_at)`, `(simulation_enabled, archive_status)`, `(source_profile_snapshot_id)`.
+
+### Business Rules
+
+**Eligibility**: default `member.status == "left"`; `force=True` bypasses.
+
+**Idempotency**: if already `archived`, returns existing record with `was_already_archived=True`.
+
+**Re-archive after restore**: updates the existing row in place (same PK); refreshes all archive fields and resets `simulation_enabled=False`.
+
+**Restore**: sets `archive_status="restored"`, `simulation_enabled=False`. Row and `members` row both preserved.
+
+**Simulation toggle**: `enable_simulation` only allowed when `archive_status=="archived"`. `disable_simulation` always allowed.
+
+**No profile snapshot**: stored as `source_profile_snapshot_id=None`. Archive still succeeds; caller should note this in `archived_reason`.
+
+### API Endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/v1/legend/members` | List (paged, filterable by group_id / archive_status / simulation_enabled) |
+| GET | `/api/v1/legend/members/{member_id}` | Single legend member |
+| POST | `/api/v1/legend/members/{member_id}/archive` | Archive (body: `archived_reason`, `archived_by`, `force`) |
+| POST | `/api/v1/legend/members/{member_id}/restore` | Restore |
+| POST | `/api/v1/legend/members/{member_id}/enable-simulation` | Enable simulation gate |
+| POST | `/api/v1/legend/members/{member_id}/disable-simulation` | Disable simulation gate |
+
+### CLI Usage
+
+```bash
+# Archive a member who has left
+python scripts/archive_member.py <member_id> --reason "Left 2026-06-01" --by admin
+
+# Force-archive regardless of status
+python scripts/archive_member.py <member_id> --force
+
+# List all archived members in a group
+python scripts/list_legend_members.py --group-id <group_id> --status archived
+
+# Enable simulation
+python scripts/toggle_legend_simulation.py <member_id> enable
+
+# Restore
+python scripts/restore_legend_member.py <member_id>
+```
+
+### Test Isolation Note
+
+`test_legend.py` sets `app.dependency_overrides[get_db]` inside the `setup_db`
+fixture (not at module level) and restores the previous override on teardown.
+This prevents cross-module contamination when running the full test suite.
+`test_api.py` includes `legend_members` DDL so its engine is compatible if
+the override is active.
+
+### Current Status
+
+- [x] `legend_members` model with all required fields and indexes
+- [x] `archive_policy.py` pure guards (no DB)
+- [x] `LegendService` with archive / restore / simulation toggle / list
+- [x] Idempotent archive; re-archive after restore reuses same row
+- [x] Profile snapshot anchor (None if member was never profiled)
+- [x] 4 CLI scripts
+- [x] 6 API endpoints
+- [x] 46 unit tests pass; full suite 204 pass, 1 pre-existing failure
+
+**Current status**: ✅ Legend Archive MVP complete. Ready for Persona Simulation phase.
