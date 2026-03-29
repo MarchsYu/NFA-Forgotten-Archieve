@@ -394,3 +394,112 @@ uvicorn src.api.app:app --host 0.0.0.0 --port 8000
 - **Route layer** (FastAPI `Query(ge=1, le=MAX)`) is the **authority**: returns HTTP 422 for out-of-range values before the request reaches the repository.
 - **Repository layer** also clamps with `min(max(1, limit), MAX)` as a safety net for direct programmatic calls.
 - No logic conflict: route rejects bad values early; repository never sees them in normal API flow.
+
+---
+
+## Processing Module – Stage-1 Pipeline (Task 7)
+
+### Directory
+
+```
+src/
+  classification/
+    topic_service.py   # ← canonical topic init function (single implementation)
+  processing/
+    __init__.py        # minimal, no DB side-effects on import
+    pipeline.py        # PipelineParams, PipelineResult, run_stage1_pipeline()
+scripts/
+  run_pipeline.py      # CLI entry point for the full pipeline
+tests/
+  test_processing.py   # 29 unit tests, no DB required
+```
+
+### Pipeline Stages (in order)
+
+| Stage | Key | What it does |
+|---|---|---|
+| ingest | `ingest` | Parse chat file → write messages to DB |
+| topics_init | `topics_init` | Seed topics table (idempotent) |
+| classification | `classification` | Classify messages by topic |
+| profiling | `profiling` | Build Persona Profile snapshots |
+
+### Topic Init – Single Canonical Implementation
+
+**Authority**: `src/classification/topic_service.init_topics()`
+
+Both callers delegate to this one function:
+- `scripts/init_topics.py` → thin CLI wrapper, calls `init_topics()`
+- `src/processing/pipeline._run_topics_init()` → calls `init_topics()`
+
+There is **no** second implementation of topic seeding logic anywhere.
+`init_topics()` accepts an optional `session` parameter; if `None`, it creates,
+commits, and closes its own `SessionLocal()`.
+
+### PipelineParams Cross-field Validation
+
+`_validate_params()` is called at the very start of `run_stage1_pipeline()`,
+before any DB work:
+
+| Check | Error message |
+|---|---|
+| `member_id` without `group_id` | "member_id requires group_id" |
+| profiling stage runs but `window_start` or `window_end` is None | "window_start and window_end are required for the profiling stage" |
+| `window_start >= window_end` | "window_start … must be before window_end" |
+| ingest stage runs but `chat_file` is None | "chat_file is required for the ingest stage" |
+| unknown stage name in `skip_stages` | "Unknown stage name(s) in skip_stages" |
+
+### run_id Format
+
+`YYYYMMDDTHHMMSS_<6-char hex>` (UTC timestamp + random suffix from `uuid4().hex[:6]`).
+
+Rationale: timestamp gives human-readable ordering; 6-char hex suffix prevents
+collisions when two runs start within the same second (probability ≈ 1/16M).
+
+### Error Handling – Result Object vs Logs
+
+- `StageOutcome.error_summary`: short one-line string (`"RuntimeError: …"`).
+  No traceback. Safe to surface in APIs or task-system UIs.
+- Full traceback: emitted via `logging.error()` only. Never stored in result objects.
+- Pipeline does **not** abort on stage failure: all stages are attempted in order.
+  `PipelineResult.success` is `False` if any stage failed.
+
+### Running the Pipeline
+
+```bash
+# Full pipeline
+python scripts/run_pipeline.py \
+    --chat-file exports/chat.json \
+    --window-start 2026-01-01T00:00:00Z \
+    --window-end   2026-12-31T23:59:59Z
+
+# Skip ingest (data already in DB)
+python scripts/run_pipeline.py \
+    --skip ingest \
+    --window-start 2000-01-01T00:00:00Z \
+    --window-end   2099-12-31T23:59:59Z
+
+# Re-run classification + profiling from scratch
+python scripts/run_pipeline.py \
+    --skip ingest topics_init \
+    --rerun \
+    --window-start 2026-01-01T00:00:00Z \
+    --window-end   2026-12-31T23:59:59Z
+
+# Verbose logging
+python scripts/run_pipeline.py --skip ingest --log-level INFO \
+    --window-start 2000-01-01T00:00:00Z --window-end 2099-12-31T23:59:59Z
+```
+
+### Stage-1 Stability Checklist
+
+- [x] ingest → topics_init → classification → profiling order enforced
+- [x] Each stage independently skippable via `--skip`
+- [x] `--rerun` passed through to classification and profiling services
+- [x] Topic init has single canonical implementation (`topic_service.init_topics`)
+- [x] Cross-field param validation before any DB work
+- [x] `run_id` collision-resistant (timestamp + random suffix)
+- [x] `error_summary` in result objects; traceback in logs only
+- [x] 29 unit tests pass (no DB required)
+- [x] Full test suite: 158 pass, 1 pre-existing failure (ingest TXT dedup bug)
+
+**Current status**: ✅ Stage-1 pipeline is stable and closed-loop.
