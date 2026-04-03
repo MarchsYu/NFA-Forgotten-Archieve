@@ -17,7 +17,7 @@ GET /api/v1/members/{member_id}/profiles
 
 from fastapi import FastAPI
 
-from src.api.routes import health, groups, members
+from src.api.routes import health, groups, members, legend
 
 app = FastAPI(
     title="NFA Forgotten Archive API",
@@ -35,3 +35,4 @@ _PREFIX = "/api/v1"
 app.include_router(health.router, prefix=_PREFIX)
 app.include_router(groups.router, prefix=_PREFIX)
 app.include_router(members.router, prefix=_PREFIX)
+app.include_router(legend.router, prefix=_PREFIX)
