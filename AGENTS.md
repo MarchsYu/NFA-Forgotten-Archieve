@@ -503,3 +503,140 @@ python scripts/run_pipeline.py --skip ingest --log-level INFO \
 - [x] Full test suite: 158 pass, 1 pre-existing failure (ingest TXT dedup bug)
 
 **Current status**: ✅ Stage-1 pipeline is stable and closed-loop.
+
+---
+
+## Legend Archive Module (Task 8)
+
+### Overview
+
+Legend Archive is the foundation layer for member archival and future Persona Simulation.
+It provides database-level state consistency guarantees and idempotent archive operations.
+
+### Directory
+
+```
+src/
+  db/models/
+    legend_member.py       # LegendMember model with CHECK constraints
+  legend/
+    __init__.py            # Exports LegendService, ArchiveResult, RestoreResult
+    legend_repository.py   # DB query functions
+    legend_service.py      # Business logic with idempotent archive_member
+  api/
+    routes/legend.py       # POST /legend/archive, GET /legend/members
+    schemas/legend.py      # LegendMemberSchema, ArchiveMemberRequest/Response
+scripts/
+  migrate_legend.py        # Migration script for legend_members table
+tests/
+  test_legend.py           # 6 tests covering concurrent archive semantics
+```
+
+### Database Model – legend_members
+
+**Columns**:
+- `id` (UUID, PK)
+- `member_id` (UUID, FK → members.id, UNIQUE)
+- `archive_status` (VARCHAR(32), NOT NULL)
+- `simulation_enabled` (BOOLEAN, NOT NULL, default false)
+- `archived_at` (TIMESTAMP WITH TIME ZONE, NOT NULL)
+- `restored_at` (TIMESTAMP WITH TIME ZONE, nullable)
+
+**CHECK Constraints** (database-level):
+
+1. `ck_legend_member_archive_status`: Only allows `'archived'` or `'restored'`
+2. `ck_legend_member_restored_no_simulation`: Enforces `NOT (archive_status = 'restored' AND simulation_enabled = true)`
+
+**Why CHECK constraints**: Provides database-level state consistency even if service layer is bypassed.
+Prevents invalid states at the lowest level.
+
+### Concurrent First-Archive Idempotency
+
+**Problem**: Two concurrent requests archiving the same member for the first time could both
+attempt to INSERT, causing the second to hit UNIQUE(member_id) constraint and fail with 500.
+
+**Solution** (in `LegendService.archive_member`):
+
+1. Check if legend_member exists for member_id
+2. If exists and archived → return `was_already_archived=True`
+3. If exists and restored → update to archived
+4. If not exists → INSERT new legend_member
+5. **Catch IntegrityError** on INSERT:
+   - Rollback transaction
+   - Re-query legend_member by member_id
+   - If found and archived → return `was_already_archived=True`
+   - Otherwise re-raise
+
+**Result**: Concurrent first-archive returns idempotent "already archived" response instead of 500.
+
+### API Endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| POST | `/api/v1/legend/archive` | Archive a member (idempotent) |
+| GET | `/api/v1/legend/members` | List legend members with filtering |
+
+**POST /legend/archive**:
+- Request: `{"member_id": "<uuid>"}`
+- Response: `{"member_id": "<uuid>", "was_already_archived": bool, "legend_member": {...}}`
+- Commits transaction after successful archive
+
+**GET /legend/members**:
+- Query params: `archive_status` (Literal["archived", "restored"]), `limit`, `offset`
+- `archive_status` validation: FastAPI Literal type rejects invalid values with 422
+- Sorting: `archived_at DESC, id DESC` (stable, no pagination jitter)
+- Returns: `PagedResponse[LegendMemberSchema]`
+
+### Transaction Boundaries
+
+- API routes call `db.commit()` explicitly after service operations
+- No direct access to `service._session` from routes
+- Clean separation: routes handle transaction boundaries, service handles business logic
+
+### Migration
+
+```bash
+# Add legend_members table to existing database
+python scripts/migrate_legend.py
+
+# Or use init_db.py for fresh database (includes all tables)
+python scripts/init_db.py
+```
+
+### Test Coverage
+
+6 tests in `test_legend.py`:
+- First-time archive
+- Already archived (idempotent)
+- Concurrent IntegrityError handling
+- CHECK constraint validation (model-level, enforced at DB)
+
+### Design Decisions
+
+**Why CHECK over ENUM**:
+- CHECK constraints are explicit and portable
+- Easy to extend (just modify constraint)
+- Consistent with project style (see Member.status)
+
+**Why repository + service layers**:
+- Repository: pure DB queries, no business logic
+- Service: orchestrates repository calls, handles idempotency, manages transactions
+- Clean separation of concerns
+
+**Why Literal type for archive_status param**:
+- FastAPI validates at route layer (returns 422 for invalid values)
+- Type-safe, self-documenting API
+- No silent empty results on typos
+
+### Readiness for Persona Simulation
+
+Legend Archive is ready when:
+- [x] Database-level state constraints enforced
+- [x] Concurrent first-archive is idempotent
+- [x] archive_status parameter validated at API layer
+- [x] List sorting is stable (archived_at DESC, id DESC)
+- [x] Transaction boundaries are clean (no _session access in routes)
+- [x] Tests cover concurrent archive semantics
+- [ ] Validated on real dataset with PostgreSQL
+
+**Current status**: ✅ Legend Archive foundation is stable. Ready for Persona Simulation design.

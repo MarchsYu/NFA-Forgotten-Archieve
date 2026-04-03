@@ -4,6 +4,7 @@ from src.db.models.message import Message
 from src.db.models.topic import Topic
 from src.db.models.message_topic import MessageTopic
 from src.db.models.profile_snapshot import ProfileSnapshot
+from src.db.models.legend_member import LegendMember
 
 __all__ = [
     "Group",
@@ -12,4 +13,5 @@ __all__ = [
     "Topic",
     "MessageTopic",
     "ProfileSnapshot",
+    "LegendMember",
 ]
