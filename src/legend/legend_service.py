@@ -132,8 +132,6 @@ class LegendService:
         session = self._get_session()
         try:
             member = self._load_member_or_raise(session, member_id)
-            assert_eligible_for_archive(member.status, force=force)
-
             existing = repo.get_by_member_id(session, member_id)
             now = datetime.now(tz=timezone.utc)
             snapshot_id = repo.get_latest_profile_snapshot_id(session, member_id)
@@ -148,6 +146,8 @@ class LegendService:
                     was_already_archived=True,
                     profile_snapshot_id=existing.source_profile_snapshot_id,
                 )
+
+            assert_eligible_for_archive(member.status, force=force)
 
             if existing is not None:
                 # Re-archive after restore: update in place
@@ -187,7 +187,10 @@ class LegendService:
                             was_already_archived=True,
                             profile_snapshot_id=existing_after_conflict.source_profile_snapshot_id,
                         )
-                    raise
+                    raise RuntimeError(
+                        "Failed to archive member due to concurrent insert conflict, "
+                        "but no archived legend row could be reloaded."
+                    )
 
             self._close_session(commit=True)
             return ArchiveResult(
