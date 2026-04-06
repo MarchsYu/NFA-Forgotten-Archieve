@@ -20,13 +20,15 @@ from typing import Generator
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, func, select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from src.api.app import app
 from src.api.deps import get_db
 from src.db.models import Group, Member, ProfileSnapshot, LegendMember
+from src.legend import legend_repository as repo
 from src.legend.archive_policy import (
     ArchiveNotEligibleError,
     InvalidStatusTransitionError,
@@ -239,6 +241,20 @@ def _cleanup_legend(member_id: uuid.UUID) -> None:
         session.close()
 
 
+def _legend_count(member_id: uuid.UUID) -> int:
+    session = _TestingSessionLocal()
+    try:
+        return int(
+            session.execute(
+                select(func.count())
+                .select_from(LegendMember)
+                .where(LegendMember.member_id == member_id)
+            ).scalar_one()
+        )
+    finally:
+        session.close()
+
+
 # ===========================================================================
 # TestArchivePolicy – pure unit tests, no DB
 # ===========================================================================
@@ -289,9 +305,36 @@ class TestLegendServiceArchive:
     def test_archive_is_idempotent(self):
         svc = _service()
         svc.archive_member(_MEMBER_LEFT_ID)
+        before = _legend_count(_MEMBER_LEFT_ID)
         result2 = _service().archive_member(_MEMBER_LEFT_ID)
+        after = _legend_count(_MEMBER_LEFT_ID)
         assert result2.was_already_archived is True
         assert result2.archive_status == "archived"
+        assert before == 1
+        assert after == 1
+
+    def test_archive_integrity_error_fallback_returns_idempotent_result(self, monkeypatch):
+        _service().archive_member(_MEMBER_LEFT_ID)
+
+        original_get_by_member_id = repo.get_by_member_id
+        state = {"calls": 0}
+
+        def fake_get_by_member_id(session, member_id):
+            state["calls"] += 1
+            if state["calls"] == 1:
+                return None
+            return original_get_by_member_id(session, member_id)
+
+        def raise_integrity_error(*args, **kwargs):
+            raise IntegrityError("UNIQUE constraint failed: legend_members.member_id", None, None)
+
+        monkeypatch.setattr("src.legend.legend_service.repo.get_by_member_id", fake_get_by_member_id)
+        monkeypatch.setattr("src.legend.legend_service.repo.create_legend_member", raise_integrity_error)
+
+        result = _service().archive_member(_MEMBER_LEFT_ID)
+        assert result.was_already_archived is True
+        assert result.archive_status == "archived"
+        assert _legend_count(_MEMBER_LEFT_ID) == 1
 
     def test_archive_active_member_raises(self):
         svc = _service()
@@ -543,6 +586,10 @@ class TestLegendAPI:
         assert resp.status_code == 200
         items = resp.json()["items"]
         assert all(i["archive_status"] == "archived" for i in items)
+
+    def test_list_legend_members_invalid_status_returns_422(self):
+        resp = client.get("/api/v1/legend/members?archive_status=invalid")
+        assert resp.status_code == 422
 
     def test_archive_force_flag(self):
         _cleanup_legend(_MEMBER_ACTIVE_ID)

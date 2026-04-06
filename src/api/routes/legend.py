@@ -14,7 +14,7 @@ POST /legend/members/{member_id}/disable-simulation
 from __future__ import annotations
 
 import uuid
-from typing import Annotated, Optional
+from typing import Annotated, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
@@ -39,9 +39,8 @@ def _get_service(session: Session = Depends(deps.get_db)) -> LegendService:
 
 
 def _commit(service: LegendService) -> None:
-    """Commit the service's session (used after write operations in API routes)."""
-    if service._session is not None:
-        service._session.commit()
+    """Commit the service session after write operations."""
+    service.commit()
 
 
 def _legend_or_404(service: LegendService, member_id: uuid.UUID) -> LegendMemberSchema:
@@ -62,7 +61,10 @@ def _legend_or_404(service: LegendService, member_id: uuid.UUID) -> LegendMember
 )
 def list_legend_members(
     group_id: Optional[uuid.UUID] = Query(default=None, description="Filter by group UUID"),
-    archive_status: Optional[str] = Query(default=None, description="'archived' or 'restored'"),
+    archive_status: Optional[Literal["archived", "restored"]] = Query(
+        default=None,
+        description="'archived' or 'restored'",
+    ),
     simulation_enabled: Optional[bool] = Query(default=None, description="Filter by simulation gate"),
     limit: Annotated[int, Query(ge=1, le=_MAX_LIMIT)] = _DEFAULT_LIMIT,
     offset: Annotated[int, Query(ge=0)] = 0,
