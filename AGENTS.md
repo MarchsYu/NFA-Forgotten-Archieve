@@ -22,21 +22,56 @@ src/
   db/
     base.py                  # DeclarativeBase
     session.py               # engine + SessionLocal
-    models/                  # Group, Member, Message, Topic, MessageTopic, ProfileSnapshot
+    models/                  # Group, Member, Message, Topic, MessageTopic, ProfileSnapshot, LegendMember
   ingest/                    # Chat log parsers + IngestService (DO NOT MODIFY)
   classification/
     topic_rules.py           # Taxonomy: 8 TopicDefinition objects + confidence constants
     topic_classifier.py      # TopicClassifier.classify() → List[TopicMatch]
     classification_service.py # ClassificationService.run() → ClassificationResult
+    topic_service.py         # init_topics() – single canonical topic-init entry point
+  profiling/
+    profile_analyzers.py     # pure analysis functions
+    profile_builder.py       # ProfileData + ProfileBuilder
+    profile_service.py       # DB orchestration
+  legend/
+    __init__.py              # no re-exports (avoids DB side-effects on import)
+    archive_policy.py        # pure eligibility + state-transition guards
+    legend_repository.py     # DB reads/writes for legend_members
+    legend_schemas.py        # ArchiveResult, RestoreResult, SimulationToggleResult, LegendMemberSchema
+    legend_service.py        # LegendService: archive/restore/enable-sim/disable-sim/list
+  api/
+    app.py                   # FastAPI app (v0.2.0), mounts all routers
+    deps.py                  # get_db() dependency
+    repository.py            # read-only query functions
+    routes/
+      health.py              # GET /api/v1/health
+      groups.py              # GET /api/v1/groups, /{group_id}, /{group_id}/members
+      members.py             # GET /api/v1/members/{id}, /messages, /profile/latest, /profiles
+      legend.py              # Legend Archive endpoints (GET + POST)
+    schemas/
+      common.py              # PagedResponse[T]
+      group.py / member.py / message.py / profile.py / (legend in legend_schemas.py)
+  processing/
+    pipeline.py              # PipelineParams, StageOutcome, PipelineResult, run_stage1_pipeline()
 scripts/
   init_db.py                 # create_all()
-  init_topics.py             # seed topics table from topic_rules.TOPICS
+  init_topics.py             # thin CLI wrapper → topic_service.init_topics()
   import_chat.py             # CLI wrapper for IngestService
   run_topic_classification.py # CLI wrapper for ClassificationService
+  run_profiling.py           # CLI wrapper for ProfileService
+  run_pipeline.py            # unified Stage-1 pipeline CLI
+  archive_member.py          # archive a member into Legend Archive
+  list_legend_members.py     # list legend members with filters
+  toggle_legend_simulation.py # enable/disable simulation for a legend member
+  restore_legend_member.py   # restore an archived legend member
 tests/
   test_classification.py     # 17 unit tests, no DB required
   test_ingest_service.py
   test_parsers.py
+  test_profiling.py          # 75 unit tests, no DB required
+  test_api.py                # 32 API tests, SQLite in-memory
+  test_processing.py         # 29 unit tests, no DB required
+  test_legend.py             # 46 unit tests (policy + service + API), SQLite in-memory
 ```
 
 ## Running Tests
@@ -506,137 +541,107 @@ python scripts/run_pipeline.py --skip ingest --log-level INFO \
 
 ---
 
-## Legend Archive Module (Task 8)
-
-### Overview
-
-Legend Archive is the foundation layer for member archival and future Persona Simulation.
-It provides database-level state consistency guarantees and idempotent archive operations.
+## Legend Archive Module (Phase 2, Task 1)
 
 ### Directory
 
 ```
-src/
-  db/models/
-    legend_member.py       # LegendMember model with CHECK constraints
-  legend/
-    __init__.py            # Exports LegendService, ArchiveResult, RestoreResult
-    legend_repository.py   # DB query functions
-    legend_service.py      # Business logic with idempotent archive_member
-  api/
-    routes/legend.py       # POST /legend/archive, GET /legend/members
-    schemas/legend.py      # LegendMemberSchema, ArchiveMemberRequest/Response
+src/legend/
+  __init__.py          # no re-exports (pure modules importable without DB)
+  archive_policy.py    # pure eligibility + state-transition guards (no DB)
+  legend_repository.py # DB reads/writes for legend_members
+  legend_schemas.py    # ArchiveResult, RestoreResult, SimulationToggleResult, LegendMemberSchema
+  legend_service.py    # LegendService: archive/restore/enable-sim/disable-sim/list
 scripts/
-  migrate_legend.py        # Migration script for legend_members table
+  archive_member.py          # archive a member
+  list_legend_members.py     # list with filters
+  toggle_legend_simulation.py # enable/disable simulation
+  restore_legend_member.py   # restore an archived member
 tests/
-  test_legend.py           # 6 tests covering concurrent archive semantics
+  test_legend.py       # 46 unit tests (policy + service + API), SQLite in-memory
 ```
 
-### Database Model – legend_members
+### legend_members Table
 
-**Columns**:
-- `id` (UUID, PK)
-- `member_id` (UUID, FK → members.id, UNIQUE)
-- `archive_status` (VARCHAR(32), NOT NULL)
-- `simulation_enabled` (BOOLEAN, NOT NULL, default false)
-- `archived_at` (TIMESTAMP WITH TIME ZONE, NOT NULL)
-- `restored_at` (TIMESTAMP WITH TIME ZONE, nullable)
+| Column | Type | Notes |
+|---|---|---|
+| `id` | UUID PK | |
+| `member_id` | UUID FK → members.id | UNIQUE – one row per member |
+| `group_id` | UUID FK → groups.id | |
+| `archive_status` | String(32) | `"archived"` / `"restored"` |
+| `archived_at` | DateTime(tz) | NOT NULL |
+| `archived_reason` | Text | nullable |
+| `archived_by` | String(255) | nullable |
+| `source_profile_snapshot_id` | UUID FK → profile_snapshots.id | nullable; SET NULL on delete |
+| `member_display_name_snapshot` | String(255) | denormalised identity |
+| `member_external_id_snapshot` | String(255) | nullable |
+| `member_status_snapshot` | String(32) | nullable |
+| `simulation_enabled` | Boolean | default False |
+| `created_at` / `updated_at` | DateTime(tz) | server_default + explicit on insert |
 
-**CHECK Constraints** (database-level):
+Indexes: `(group_id, archive_status, archived_at)`, `(simulation_enabled, archive_status)`, `(source_profile_snapshot_id)`.
 
-1. `ck_legend_member_archive_status`: Only allows `'archived'` or `'restored'`
-2. `ck_legend_member_restored_no_simulation`: Enforces `NOT (archive_status = 'restored' AND simulation_enabled = true)`
+### Business Rules
 
-**Why CHECK constraints**: Provides database-level state consistency even if service layer is bypassed.
-Prevents invalid states at the lowest level.
+**Eligibility**: default `member.status == "left"`; `force=True` bypasses.
 
-### Concurrent First-Archive Idempotency
+**Idempotency**: if already `archived`, returns existing record with `was_already_archived=True`.
 
-**Problem**: Two concurrent requests archiving the same member for the first time could both
-attempt to INSERT, causing the second to hit UNIQUE(member_id) constraint and fail with 500.
+**Re-archive after restore**: updates the existing row in place (same PK); refreshes all archive fields and resets `simulation_enabled=False`.
 
-**Solution** (in `LegendService.archive_member`):
+**Restore**: sets `archive_status="restored"`, `simulation_enabled=False`. Row and `members` row both preserved.
 
-1. Check if legend_member exists for member_id
-2. If exists and archived → return `was_already_archived=True`
-3. If exists and restored → update to archived
-4. If not exists → INSERT new legend_member
-5. **Catch IntegrityError** on INSERT:
-   - Rollback transaction
-   - Re-query legend_member by member_id
-   - If found and archived → return `was_already_archived=True`
-   - Otherwise re-raise
+**Simulation toggle**: `enable_simulation` only allowed when `archive_status=="archived"`. `disable_simulation` always allowed.
 
-**Result**: Concurrent first-archive returns idempotent "already archived" response instead of 500.
+**No profile snapshot**: stored as `source_profile_snapshot_id=None`. Archive still succeeds; caller should note this in `archived_reason`.
 
 ### API Endpoints
 
 | Method | Path | Description |
 |---|---|---|
-| POST | `/api/v1/legend/archive` | Archive a member (idempotent) |
-| GET | `/api/v1/legend/members` | List legend members with filtering |
+| GET | `/api/v1/legend/members` | List (paged, filterable by group_id / archive_status / simulation_enabled) |
+| GET | `/api/v1/legend/members/{member_id}` | Single legend member |
+| POST | `/api/v1/legend/members/{member_id}/archive` | Archive (body: `archived_reason`, `archived_by`, `force`) |
+| POST | `/api/v1/legend/members/{member_id}/restore` | Restore |
+| POST | `/api/v1/legend/members/{member_id}/enable-simulation` | Enable simulation gate |
+| POST | `/api/v1/legend/members/{member_id}/disable-simulation` | Disable simulation gate |
 
-**POST /legend/archive**:
-- Request: `{"member_id": "<uuid>"}`
-- Response: `{"member_id": "<uuid>", "was_already_archived": bool, "legend_member": {...}}`
-- Commits transaction after successful archive
-
-**GET /legend/members**:
-- Query params: `archive_status` (Literal["archived", "restored"]), `limit`, `offset`
-- `archive_status` validation: FastAPI Literal type rejects invalid values with 422
-- Sorting: `archived_at DESC, id DESC` (stable, no pagination jitter)
-- Returns: `PagedResponse[LegendMemberSchema]`
-
-### Transaction Boundaries
-
-- API routes call `db.commit()` explicitly after service operations
-- No direct access to `service._session` from routes
-- Clean separation: routes handle transaction boundaries, service handles business logic
-
-### Migration
+### CLI Usage
 
 ```bash
-# Add legend_members table to existing database
-python scripts/migrate_legend.py
+# Archive a member who has left
+python scripts/archive_member.py <member_id> --reason "Left 2026-06-01" --by admin
 
-# Or use init_db.py for fresh database (includes all tables)
-python scripts/init_db.py
+# Force-archive regardless of status
+python scripts/archive_member.py <member_id> --force
+
+# List all archived members in a group
+python scripts/list_legend_members.py --group-id <group_id> --status archived
+
+# Enable simulation
+python scripts/toggle_legend_simulation.py <member_id> enable
+
+# Restore
+python scripts/restore_legend_member.py <member_id>
 ```
 
-### Test Coverage
+### Test Isolation Note
 
-6 tests in `test_legend.py`:
-- First-time archive
-- Already archived (idempotent)
-- Concurrent IntegrityError handling
-- CHECK constraint validation (model-level, enforced at DB)
+`test_legend.py` sets `app.dependency_overrides[get_db]` inside the `setup_db`
+fixture (not at module level) and restores the previous override on teardown.
+This prevents cross-module contamination when running the full test suite.
+`test_api.py` includes `legend_members` DDL so its engine is compatible if
+the override is active.
 
-### Design Decisions
+### Current Status
 
-**Why CHECK over ENUM**:
-- CHECK constraints are explicit and portable
-- Easy to extend (just modify constraint)
-- Consistent with project style (see Member.status)
+- [x] `legend_members` model with all required fields and indexes
+- [x] `archive_policy.py` pure guards (no DB)
+- [x] `LegendService` with archive / restore / simulation toggle / list
+- [x] Idempotent archive; re-archive after restore reuses same row
+- [x] Profile snapshot anchor (None if member was never profiled)
+- [x] 4 CLI scripts
+- [x] 6 API endpoints
+- [x] 46 unit tests pass; full suite 204 pass, 1 pre-existing failure
 
-**Why repository + service layers**:
-- Repository: pure DB queries, no business logic
-- Service: orchestrates repository calls, handles idempotency, manages transactions
-- Clean separation of concerns
-
-**Why Literal type for archive_status param**:
-- FastAPI validates at route layer (returns 422 for invalid values)
-- Type-safe, self-documenting API
-- No silent empty results on typos
-
-### Readiness for Persona Simulation
-
-Legend Archive is ready when:
-- [x] Database-level state constraints enforced
-- [x] Concurrent first-archive is idempotent
-- [x] archive_status parameter validated at API layer
-- [x] List sorting is stable (archived_at DESC, id DESC)
-- [x] Transaction boundaries are clean (no _session access in routes)
-- [x] Tests cover concurrent archive semantics
-- [ ] Validated on real dataset with PostgreSQL
-
-**Current status**: ✅ Legend Archive foundation is stable. Ready for Persona Simulation design.
+**Current status**: ✅ Legend Archive MVP complete. Ready for Persona Simulation phase.

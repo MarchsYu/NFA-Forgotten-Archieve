@@ -157,6 +157,24 @@ _DDL = [
         created_at TEXT NOT NULL
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS legend_members (
+        id TEXT PRIMARY KEY,
+        member_id TEXT NOT NULL UNIQUE REFERENCES members(id),
+        group_id TEXT NOT NULL REFERENCES groups(id),
+        archive_status TEXT NOT NULL DEFAULT 'archived',
+        archived_at TEXT NOT NULL,
+        archived_reason TEXT,
+        archived_by TEXT,
+        source_profile_snapshot_id TEXT REFERENCES profile_snapshots(id),
+        member_display_name_snapshot TEXT NOT NULL,
+        member_external_id_snapshot TEXT,
+        member_status_snapshot TEXT,
+        simulation_enabled INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
 ]
 
 

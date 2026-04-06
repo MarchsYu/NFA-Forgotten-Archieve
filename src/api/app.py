@@ -1,5 +1,5 @@
 """
-NFA Forgotten Archive – read-only REST API.
+NFA Forgotten Archive – REST API.
 
 All routes are mounted under /api/v1.
 
@@ -13,6 +13,13 @@ GET /api/v1/members/{member_id}
 GET /api/v1/members/{member_id}/messages
 GET /api/v1/members/{member_id}/profile/latest
 GET /api/v1/members/{member_id}/profiles
+
+GET  /api/v1/legend/members
+GET  /api/v1/legend/members/{member_id}
+POST /api/v1/legend/members/{member_id}/archive
+POST /api/v1/legend/members/{member_id}/restore
+POST /api/v1/legend/members/{member_id}/enable-simulation
+POST /api/v1/legend/members/{member_id}/disable-simulation
 """
 
 from fastapi import FastAPI
@@ -22,10 +29,10 @@ from src.api.routes import health, groups, members, legend
 app = FastAPI(
     title="NFA Forgotten Archive API",
     description=(
-        "Read-only API for querying groups, members, messages, "
-        "and Persona Profile snapshots."
+        "API for querying groups, members, messages, "
+        "Persona Profile snapshots, and the Legend Archive."
     ),
-    version="0.1.0",
+    version="0.2.0",
     docs_url="/docs",
     redoc_url="/redoc",
 )
