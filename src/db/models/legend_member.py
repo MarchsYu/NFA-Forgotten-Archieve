@@ -2,7 +2,17 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Optional
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, String, Text, UniqueConstraint, func
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -100,6 +110,14 @@ class LegendMember(Base):
 
     __table_args__ = (
         UniqueConstraint("member_id", name="uq_legend_members_member_id"),
+        CheckConstraint(
+            "archive_status IN ('archived', 'restored')",
+            name="ck_legend_members_archive_status_valid",
+        ),
+        CheckConstraint(
+            "NOT (archive_status = 'restored' AND simulation_enabled = true)",
+            name="ck_legend_members_restored_simulation_disabled",
+        ),
         # Primary query pattern: list by group, filter by status, order by archived_at
         Index(
             "ix_legend_members_group_status_archived",

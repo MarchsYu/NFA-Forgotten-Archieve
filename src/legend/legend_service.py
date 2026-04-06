@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from typing import List, Optional, Tuple
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from src.db.models import Member
@@ -77,6 +78,10 @@ class LegendService:
             self._session.close()
             self._session = None
 
+    def commit(self) -> None:
+        """Commit the current session (used by API when session is caller-owned)."""
+        self._get_session().commit()
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -127,8 +132,6 @@ class LegendService:
         session = self._get_session()
         try:
             member = self._load_member_or_raise(session, member_id)
-            assert_eligible_for_archive(member.status, force=force)
-
             existing = repo.get_by_member_id(session, member_id)
             now = datetime.now(tz=timezone.utc)
             snapshot_id = repo.get_latest_profile_snapshot_id(session, member_id)
@@ -144,6 +147,8 @@ class LegendService:
                     profile_snapshot_id=existing.source_profile_snapshot_id,
                 )
 
+            assert_eligible_for_archive(member.status, force=force)
+
             if existing is not None:
                 # Re-archive after restore: update in place
                 lm = repo.update_archive(
@@ -156,13 +161,36 @@ class LegendService:
                 )
             else:
                 # First-time archive: create new row
-                lm = repo.create_legend_member(
-                    session, member,
-                    archived_at=now,
-                    archived_reason=archived_reason,
-                    archived_by=archived_by,
-                    source_profile_snapshot_id=snapshot_id,
-                )
+                try:
+                    # Use a SAVEPOINT so caller-owned sessions are not left in
+                    # failed transaction state if this insert races on UNIQUE(member_id).
+                    with session.begin_nested():
+                        lm = repo.create_legend_member(
+                            session, member,
+                            archived_at=now,
+                            archived_reason=archived_reason,
+                            archived_by=archived_by,
+                            source_profile_snapshot_id=snapshot_id,
+                        )
+                except IntegrityError:
+                    # Concurrency fallback: another request inserted the row first.
+                    existing_after_conflict = repo.get_by_member_id(session, member_id)
+                    if (
+                        existing_after_conflict is not None
+                        and existing_after_conflict.archive_status == STATUS_ARCHIVED
+                    ):
+                        self._close_session(commit=False)
+                        return ArchiveResult(
+                            legend_member_id=existing_after_conflict.id,
+                            member_id=member_id,
+                            archive_status=STATUS_ARCHIVED,
+                            was_already_archived=True,
+                            profile_snapshot_id=existing_after_conflict.source_profile_snapshot_id,
+                        )
+                    raise RuntimeError(
+                        "Failed to archive member due to concurrent insert conflict, "
+                        "but no archived legend row could be reloaded."
+                    )
 
             self._close_session(commit=True)
             return ArchiveResult(
