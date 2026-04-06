@@ -162,16 +162,18 @@ class LegendService:
             else:
                 # First-time archive: create new row
                 try:
-                    lm = repo.create_legend_member(
-                        session, member,
-                        archived_at=now,
-                        archived_reason=archived_reason,
-                        archived_by=archived_by,
-                        source_profile_snapshot_id=snapshot_id,
-                    )
+                    # Use a SAVEPOINT so caller-owned sessions are not left in
+                    # failed transaction state if this insert races on UNIQUE(member_id).
+                    with session.begin_nested():
+                        lm = repo.create_legend_member(
+                            session, member,
+                            archived_at=now,
+                            archived_reason=archived_reason,
+                            archived_by=archived_by,
+                            source_profile_snapshot_id=snapshot_id,
+                        )
                 except IntegrityError:
                     # Concurrency fallback: another request inserted the row first.
-                    session.rollback()
                     existing_after_conflict = repo.get_by_member_id(session, member_id)
                     if (
                         existing_after_conflict is not None

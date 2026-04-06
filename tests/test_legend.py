@@ -305,6 +305,7 @@ class TestLegendServiceArchive:
     def test_archive_is_idempotent(self):
         svc = _service()
         svc.archive_member(_MEMBER_LEFT_ID)
+        svc.commit()
         before = _legend_count(_MEMBER_LEFT_ID)
         result2 = _service().archive_member(_MEMBER_LEFT_ID)
         after = _legend_count(_MEMBER_LEFT_ID)
@@ -314,7 +315,9 @@ class TestLegendServiceArchive:
         assert after == 1
 
     def test_archive_integrity_error_fallback_returns_idempotent_result(self, monkeypatch):
-        _service().archive_member(_MEMBER_LEFT_ID)
+        seed_svc = _service()
+        seed_svc.archive_member(_MEMBER_LEFT_ID)
+        seed_svc.commit()
 
         original_get_by_member_id = repo.get_by_member_id
         state = {"calls": 0}
