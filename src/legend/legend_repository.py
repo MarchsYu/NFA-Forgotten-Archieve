@@ -49,7 +49,7 @@ def list_legend_members(
     """
     Return (rows, total_count) with optional filters.
 
-    Ordered by ``archived_at DESC`` (most recently archived first).
+    Ordered by ``archived_at DESC, id DESC`` for stable pagination.
     """
     limit = min(max(1, limit), 500)
     offset = max(0, offset)
@@ -69,6 +69,7 @@ def list_legend_members(
     rows = list(
         session.execute(
             base.order_by(LegendMember.archived_at.desc())
+            .order_by(LegendMember.id.desc())
             .limit(limit)
             .offset(offset)
         ).scalars().all()
