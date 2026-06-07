@@ -122,23 +122,25 @@ _DDL = [
     """
     CREATE TABLE IF NOT EXISTS topics (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        key TEXT NOT NULL UNIQUE,
-        label TEXT NOT NULL,
+        topic_key TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL,
         description TEXT,
-        is_primary_eligible INTEGER NOT NULL DEFAULT 1,
-        created_at TEXT NOT NULL
+        parent_topic_id INTEGER REFERENCES topics(id),
+        is_active INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
     )
     """,
     """
     CREATE TABLE IF NOT EXISTS message_topics (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
         message_id INTEGER NOT NULL REFERENCES messages(id),
         topic_id INTEGER NOT NULL REFERENCES topics(id),
         classifier_version TEXT NOT NULL,
-        confidence REAL NOT NULL DEFAULT 0.0,
+        confidence NUMERIC NOT NULL,
         is_primary INTEGER NOT NULL DEFAULT 0,
         evidence TEXT,
-        created_at TEXT NOT NULL
+        assigned_at TEXT NOT NULL,
+        PRIMARY KEY (message_id, topic_id, classifier_version)
     )
     """,
     """
