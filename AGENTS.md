@@ -645,3 +645,85 @@ the override is active.
 - [x] 46 unit tests pass; full suite 204 pass, 1 pre-existing failure
 
 **Current status**: ✅ Legend Archive MVP complete. Ready for Persona Simulation phase.
+
+---
+
+## Persona Simulation Module (P2T2-S1 / S2)
+
+### Directory
+
+```
+src/simulation/
+  __init__.py              # no re-exports (avoids DB side-effects on import)
+  simulation_policy.py     # pure guards: assert_can_simulate()
+  simulation_schemas.py    # SimulationRequest, SimulationResult, HistoricalMessage
+  prompt_builder.py        # pure: build_prompt() → list[{role, content}]
+  simulation_repository.py # read-only DB: get_legend_member, get_profile_snapshot_by_id,
+                           #               sample_member_messages
+  llm_client.py            # LLMClient ABC + EchoLLMClient (fake, default)
+  providers.py             # OpenAICompatibleLLMClient + build_llm_client() factory
+  simulation_service.py    # SimulationService.generate_once()
+scripts/
+  run_simulation.py        # CLI entry point
+tests/
+  test_simulation.py       # 75 unit tests, SQLite in-memory
+```
+
+### What it does
+
+Stateless single-round Persona Simulation:
+`legend_member` → policy guard → `profile_snapshot` (exact anchor) →
+message sample → prompt build → LLM client → `SimulationResult`
+
+**Read-only**: never writes to `legend_members`, `profile_snapshots`, or `messages`.
+
+### Supported LLM Providers
+
+| Provider | Description |
+|---|---|
+| `echo` | EchoLLMClient – fake, no network (default) |
+| `openai_compatible` | Any OpenAI Chat Completions endpoint (OpenAI, OpenRouter, …) |
+
+### Environment Variables
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `SIM_LLM_PROVIDER` | No | `echo` | `echo` or `openai_compatible` |
+| `SIM_LLM_API_KEY` | For real LLM | — | Bearer token; never logged |
+| `SIM_LLM_BASE_URL` | No | `https://api.openai.com/v1` | API endpoint base URL |
+| `SIM_LLM_MODEL` | For real LLM | — | Model name, e.g. `gpt-4o-mini` |
+| `SIM_LLM_TIMEOUT_SECONDS` | No | `60` | Request timeout |
+
+### CLI Usage
+
+```bash
+# Echo mode (default, no credentials needed):
+python scripts/run_simulation.py \
+    --legend-member-id <UUID> \
+    --message "你最近在玩什么游戏？"
+
+# Real LLM via environment variables:
+SIM_LLM_PROVIDER=openai_compatible \
+SIM_LLM_API_KEY=sk-... \
+SIM_LLM_MODEL=gpt-4o-mini \
+python scripts/run_simulation.py \
+    --legend-member-id <UUID> \
+    --message "推荐个游戏"
+
+# CLI overrides (provider / model / base-url):
+python scripts/run_simulation.py \
+    --legend-member-id <UUID> \
+    --message "推荐个游戏" \
+    --provider openai_compatible \
+    --model gpt-4o-mini \
+    --base-url https://openrouter.ai/api/v1
+```
+
+### Current Limitations (by design)
+
+- **No API endpoints** – CLI only.
+- **No simulation_runs table** – results are not persisted.
+- **No RAG / vector search** – message sampling is window + limit only.
+- **No multi-persona group chat** – single stateless round only.
+- **No long-term memory** – each call is independent.
+
