@@ -1,0 +1,33 @@
+{
+  "_comment": "OneBot v11 group text with Unicode emoji. Mapped from Field Discovery M-04.",
+  "_source": "M-04.group_text_emoji.raw.redacted.json",
+  "self_id": 10001,
+  "user_id": 10002,
+  "time": 1780934626,
+  "message_id": 90004,
+  "message_seq": 1676,
+  "real_id": 80004,
+  "real_seq": "1676",
+  "message_type": "group",
+  "sender": {
+    "user_id": 10002,
+    "nickname": "TestOwner",
+    "card": "",
+    "role": "owner"
+  },
+  "raw_message": "emoji test \ud83d\ude08\ud83e\udd14\ud83d\ude21",
+  "font": 14,
+  "sub_type": "normal",
+  "message": [
+    {
+      "type": "text",
+      "data": {
+        "text": "emoji test \ud83d\ude08\ud83e\udd14\ud83d\ude21"
+      }
+    }
+  ],
+  "message_format": "array",
+  "post_type": "message",
+  "group_id": 70001,
+  "group_name": "NFA Test Group"
+}

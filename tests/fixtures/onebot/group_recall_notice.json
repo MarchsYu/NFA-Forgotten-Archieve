@@ -1,0 +1,12 @@
+{
+  "_comment": "OneBot v11 group_recall notice event. Mapped from Field Discovery M-08. Note: this is a NOTICE, not a message. Fields differ from message events.",
+  "_source": "M-08.group_recall_notice.raw.redacted.json",
+  "time": 1780934881,
+  "self_id": 10001,
+  "post_type": "notice",
+  "group_id": 70001,
+  "user_id": 10002,
+  "notice_type": "group_recall",
+  "operator_id": 10002,
+  "message_id": 90008
+}
