@@ -1,0 +1,43 @@
+{
+  "_comment": "OneBot v11 group image message. Mapped from Field Discovery M-06. Note: image.data.file_size can be string.",
+  "_source": "M-06.group_image.raw.redacted.json",
+  "self_id": 10001,
+  "user_id": 10002,
+  "time": 1780934866,
+  "message_id": 90006,
+  "message_seq": 1682,
+  "real_id": 80006,
+  "real_seq": "1682",
+  "message_type": "group",
+  "sender": {
+    "user_id": 10002,
+    "nickname": "TestOwner",
+    "card": "",
+    "role": "owner"
+  },
+  "raw_message": "[CQ:image,file=AABBCCDD.png,sub_type=0,url=https://example.com/image.png,file_size=12345]caption text",
+  "font": 14,
+  "sub_type": "normal",
+  "message": [
+    {
+      "type": "image",
+      "data": {
+        "summary": "",
+        "file": "AABBCCDD.png",
+        "sub_type": 0,
+        "url": "https://example.com/image.png",
+        "file_size": "12345"
+      }
+    },
+    {
+      "type": "text",
+      "data": {
+        "text": "caption text"
+      }
+    }
+  ],
+  "message_format": "array",
+  "post_type": "message",
+  "group_id": 70001,
+  "group_name": "NFA Test Group"
+}

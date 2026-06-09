@@ -1,0 +1,33 @@
+{
+  "_comment": "OneBot v11 group plain text from a regular member. Mapped from Field Discovery M-02.",
+  "_source": "M-02.group_text_member.raw.redacted.json",
+  "self_id": 10001,
+  "user_id": 10003,
+  "time": 1780934546,
+  "message_id": 90002,
+  "message_seq": 1674,
+  "real_id": 80002,
+  "real_seq": "1674",
+  "message_type": "group",
+  "sender": {
+    "user_id": 10003,
+    "nickname": "TestMember",
+    "card": "",
+    "role": "member"
+  },
+  "raw_message": "normal member text",
+  "font": 14,
+  "sub_type": "normal",
+  "message": [
+    {
+      "type": "text",
+      "data": {
+        "text": "normal member text"
+      }
+    }
+  ],
+  "message_format": "array",
+  "post_type": "message",
+  "group_id": 70001,
+  "group_name": "NFA Test Group"
+}

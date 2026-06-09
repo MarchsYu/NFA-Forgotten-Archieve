@@ -1,0 +1,45 @@
+{
+  "_comment": "OneBot v11 group text with @ segment. Mapped from Field Discovery M-05. Note: at.data.qq is a STRING, not int.",
+  "_source": "M-05.group_text_at.raw.redacted.json",
+  "self_id": 10001,
+  "user_id": 10002,
+  "time": 1780934850,
+  "message_id": 90005,
+  "message_seq": 1681,
+  "real_id": 80005,
+  "real_seq": "1681",
+  "message_type": "group",
+  "sender": {
+    "user_id": 10002,
+    "nickname": "TestOwner",
+    "card": "",
+    "role": "owner"
+  },
+  "raw_message": "at test [CQ:at,qq=10006]  hello",
+  "font": 14,
+  "sub_type": "normal",
+  "message": [
+    {
+      "type": "text",
+      "data": {
+        "text": "at test "
+      }
+    },
+    {
+      "type": "at",
+      "data": {
+        "qq": "10006"
+      }
+    },
+    {
+      "type": "text",
+      "data": {
+        "text": "  hello"
+      }
+    }
+  ],
+  "message_format": "array",
+  "post_type": "message",
+  "group_id": 70001,
+  "group_name": "NFA Test Group"
+}

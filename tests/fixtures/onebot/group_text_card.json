@@ -1,0 +1,33 @@
+{
+  "_comment": "OneBot v11 group text where sender has set a group card. Mapped from Field Discovery M-03. Note: card may still be empty string if NapCat does not return it.",
+  "_source": "M-03.group_text_card.raw.redacted.json",
+  "self_id": 10001,
+  "user_id": 10004,
+  "time": 1780934584,
+  "message_id": 90003,
+  "message_seq": 1675,
+  "real_id": 80003,
+  "real_seq": "1675",
+  "message_type": "group",
+  "sender": {
+    "user_id": 10004,
+    "nickname": "TestCardUser",
+    "card": "CoolAlias",
+    "role": "member"
+  },
+  "raw_message": "member card text",
+  "font": 14,
+  "sub_type": "normal",
+  "message": [
+    {
+      "type": "text",
+      "data": {
+        "text": "member card text"
+      }
+    }
+  ],
+  "message_format": "array",
+  "post_type": "message",
+  "group_id": 70001,
+  "group_name": "NFA Test Group"
+}

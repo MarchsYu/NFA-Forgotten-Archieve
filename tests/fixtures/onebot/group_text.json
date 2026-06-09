@@ -1,0 +1,33 @@
+{
+  "_comment": "OneBot v11 group plain text message (owner). Mapped from Field Discovery M-01.",
+  "_source": "M-01.group_text.raw.redacted.json",
+  "self_id": 10001,
+  "user_id": 10002,
+  "time": 1780932225,
+  "message_id": 90001,
+  "message_seq": 1668,
+  "real_id": 80001,
+  "real_seq": "1668",
+  "message_type": "group",
+  "sender": {
+    "user_id": 10002,
+    "nickname": "TestOwner",
+    "card": "",
+    "role": "owner"
+  },
+  "raw_message": "hello world",
+  "font": 14,
+  "sub_type": "normal",
+  "message": [
+    {
+      "type": "text",
+      "data": {
+        "text": "hello world"
+      }
+    }
+  ],
+  "message_format": "array",
+  "post_type": "message",
+  "group_id": 70001,
+  "group_name": "NFA Test Group"
+}

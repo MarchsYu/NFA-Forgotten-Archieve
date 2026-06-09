@@ -1,0 +1,45 @@
+{
+  "_comment": "OneBot v11 group reply (quote) message. Mapped from Field Discovery M-07. Note: reply.data.id is a STRING; at segment may follow.",
+  "_source": "M-07.group_reply.raw.redacted.json",
+  "self_id": 10001,
+  "user_id": 10002,
+  "time": 1780934874,
+  "message_id": 90007,
+  "message_seq": 1683,
+  "real_id": 80007,
+  "real_seq": "1683",
+  "message_type": "group",
+  "sender": {
+    "user_id": 10002,
+    "nickname": "TestOwner",
+    "card": "",
+    "role": "owner"
+  },
+  "raw_message": "[CQ:reply,id=90001][CQ:at,qq=10006] reply test",
+  "font": 14,
+  "sub_type": "normal",
+  "message": [
+    {
+      "type": "reply",
+      "data": {
+        "id": "90001"
+      }
+    },
+    {
+      "type": "at",
+      "data": {
+        "qq": "10006"
+      }
+    },
+    {
+      "type": "text",
+      "data": {
+        "text": " reply test"
+      }
+    }
+  ],
+  "message_format": "array",
+  "post_type": "message",
+  "group_id": 70001,
+  "group_name": "NFA Test Group"
+}
